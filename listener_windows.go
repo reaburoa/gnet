@@ -37,9 +37,9 @@ type listener struct {
 	addr    net.Addr
 }
 
-func (l *listener) dup() (int, string, error) {
+func (l *listener) dup() (int, error) {
 	if l.ln == nil && l.pc == nil {
-		return -1, "dup", errorx.ErrUnsupportedOp
+		return -1, errorx.ErrUnsupportedOp
 	}
 
 	var (
@@ -53,11 +53,11 @@ func (l *listener) dup() (int, string, error) {
 	}
 
 	if !ok {
-		return -1, "dup", errors.New("failed to convert net.Conn to syscall.Conn")
+		return -1, errors.New("failed to convert net.Conn to syscall.Conn")
 	}
 	rc, err := sc.SyscallConn()
 	if err != nil {
-		return -1, "dup", errors.New("failed to get syscall.RawConn from net.Conn")
+		return -1, errors.New("failed to get syscall.RawConn from net.Conn")
 	}
 
 	var dupHandle windows.Handle
@@ -74,13 +74,13 @@ func (l *listener) dup() (int, string, error) {
 		)
 	})
 	if err != nil {
-		return -1, "dup", err
+		return -1, err
 	}
 	if e != nil {
-		return -1, "dup", e
+		return -1, e
 	}
 
-	return int(dupHandle), "dup", nil
+	return int(dupHandle), nil
 }
 
 func (l *listener) close() {
@@ -90,9 +90,6 @@ func (l *listener) close() {
 			return
 		}
 		logging.Error(os.NewSyscallError("close", l.ln.Close()))
-		if l.network == "unix" {
-			logging.Error(os.RemoveAll(l.address))
-		}
 	})
 }
 
@@ -124,7 +121,7 @@ func initListener(network, addr string, options *Options) (l *listener, err erro
 		}
 		l.addr = l.pc.LocalAddr()
 	case "unix":
-		logging.Error(os.Remove(addr))
+		_ = os.Remove(addr)
 		fallthrough
 	case "tcp", "tcp4", "tcp6":
 		if l.ln, err = lc.Listen(context.Background(), network, addr); err != nil {

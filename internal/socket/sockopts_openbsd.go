@@ -1,4 +1,4 @@
-// Copyright (c) 2021 The Gnet Authors. All rights reserved.
+// Copyright (c) 2024 The Gnet Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build freebsd || dragonfly || netbsd || openbsd || darwin
-// +build freebsd dragonfly netbsd openbsd darwin
+package socket
 
-package netpoll
+import "golang.org/x/sys/unix"
 
-// PollEventHandler is the callback for I/O events notified by the poller.
-type PollEventHandler func(int, int16) error
+// SetKeepAlivePeriod sets whether the operating system should send
+// keep-alive messages on the connection and sets period between TCP keep-alive probes.
+func SetKeepAlivePeriod(_, _ int) error {
+	// OpenBSD has no user-settable per-socket TCP keepalive options.
+	return unix.ENOPROTOOPT
+}

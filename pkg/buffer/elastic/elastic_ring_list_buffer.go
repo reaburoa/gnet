@@ -19,7 +19,7 @@ import (
 	"math"
 
 	"github.com/panjf2000/gnet/v2/pkg/buffer/linkedlist"
-	gerrors "github.com/panjf2000/gnet/v2/pkg/errors"
+	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
 )
 
 // Buffer combines ring-buffer and list-buffer.
@@ -35,7 +35,7 @@ type Buffer struct {
 // New instantiates an elastic.Buffer and returns it.
 func New(maxStaticBytes int) (*Buffer, error) {
 	if maxStaticBytes <= 0 {
-		return nil, gerrors.ErrNegativeSize
+		return nil, errorx.ErrNegativeSize
 	}
 	return &Buffer{maxStaticBytes: maxStaticBytes}, nil
 }
@@ -53,13 +53,15 @@ func (mb *Buffer) Read(p []byte) (n int, err error) {
 }
 
 // Peek returns n bytes as [][]byte, these bytes won't be discarded until Buffer.Discard() is called.
-func (mb *Buffer) Peek(n int) [][]byte {
-	if n <= 0 {
+func (mb *Buffer) Peek(n int) ([][]byte, error) {
+	if n <= 0 || n == math.MaxInt32 {
 		n = math.MaxInt32
+	} else if n > mb.Buffered() {
+		return nil, io.ErrShortBuffer
 	}
 	head, tail := mb.ringBuffer.Peek(n)
-	if mb.ringBuffer.Buffered() >= n {
-		return [][]byte{head, tail}
+	if mb.ringBuffer.Buffered() == n {
+		return [][]byte{head, tail}, nil
 	}
 	return mb.listBuffer.PeekWithBytes(n, head, tail)
 }

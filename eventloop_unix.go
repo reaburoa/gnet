@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build linux || freebsd || dragonfly || netbsd || openbsd || darwin
-// +build linux freebsd dragonfly netbsd openbsd darwin
+//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
+// +build darwin dragonfly freebsd linux netbsd openbsd
 
 package gnet
 
@@ -22,27 +22,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
 
-	"github.com/panjf2000/gnet/v2/internal/io"
+	gio "github.com/panjf2000/gnet/v2/internal/io"
 	"github.com/panjf2000/gnet/v2/internal/netpoll"
-	gerrors "github.com/panjf2000/gnet/v2/pkg/errors"
+	"github.com/panjf2000/gnet/v2/internal/queue"
+	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
 )
 
 type eventloop struct {
-	ln           *listener       // listener
-	idx          int             // loop index in the engine loops list
-	cache        bytes.Buffer    // temporary buffer for scattered bytes
-	engine       *engine         // engine in loop
-	poller       *netpoll.Poller // epoll or kqueue
-	buffer       []byte          // read packet buffer whose capacity is set by user, default value is 64KB
-	connections  connMatrix      // loop connections storage
-	eventHandler EventHandler    // user eventHandler
+	listeners    map[int]*listener // listeners
+	idx          int               // loop index in the engine loops list
+	cache        bytes.Buffer      // temporary buffer for scattered bytes
+	engine       *engine           // engine in loop
+	poller       *netpoll.Poller   // epoll or kqueue
+	buffer       []byte            // read packet buffer whose capacity is set by user, default value is 64KB
+	connections  connMatrix        // loop connections storage
+	eventHandler EventHandler      // user eventHandler
 }
 
 func (el *eventloop) getLogger() logging.Logger {
@@ -61,17 +63,33 @@ func (el *eventloop) closeConns() {
 	})
 }
 
+type connWithCallback struct {
+	c  *conn
+	cb func()
+}
+
 func (el *eventloop) register(itf interface{}) error {
-	c := itf.(*conn)
-	if err := el.poller.AddRead(&c.pollAttachment); err != nil {
+	c, ok := itf.(*conn)
+	if !ok {
+		ccb := itf.(*connWithCallback)
+		c = ccb.c
+		defer ccb.cb()
+	}
+	return el.register0(c)
+}
+
+func (el *eventloop) register0(c *conn) error {
+	addEvents := el.poller.AddRead
+	if el.engine.opts.EdgeTriggeredIO {
+		addEvents = el.poller.AddReadWrite
+	}
+	if err := addEvents(&c.pollAttachment, el.engine.opts.EdgeTriggeredIO); err != nil {
 		_ = unix.Close(c.fd)
 		c.release()
 		return err
 	}
-
 	el.connections.addConn(c, el.idx)
-
-	if c.isDatagram {
+	if c.isDatagram && c.remote != nil {
 		return nil
 	}
 	return el.open(c)
@@ -87,8 +105,8 @@ func (el *eventloop) open(c *conn) error {
 		}
 	}
 
-	if !c.outboundBuffer.IsEmpty() {
-		if err := el.poller.AddWrite(&c.pollAttachment); err != nil {
+	if !c.outboundBuffer.IsEmpty() && !el.engine.opts.EdgeTriggeredIO {
+		if err := el.poller.ModReadWrite(&c.pollAttachment, false); err != nil {
 			return err
 		}
 	}
@@ -97,13 +115,19 @@ func (el *eventloop) open(c *conn) error {
 }
 
 func (el *eventloop) read(c *conn) error {
+	if !c.opened {
+		return nil
+	}
+
+	isET := el.engine.opts.EdgeTriggeredIO
+loop:
 	n, err := unix.Read(c.fd, el.buffer)
 	if err != nil || n == 0 {
 		if err == unix.EAGAIN {
 			return nil
 		}
 		if n == 0 {
-			err = unix.ECONNRESET
+			err = io.EOF
 		}
 		return el.close(c, os.NewSyscallError("read", err))
 	}
@@ -115,10 +139,15 @@ func (el *eventloop) read(c *conn) error {
 	case Close:
 		return el.close(c, nil)
 	case Shutdown:
-		return gerrors.ErrEngineShutdown
+		return errorx.ErrEngineShutdown
 	}
 	_, _ = c.inboundBuffer.Write(c.buffer)
 	c.buffer = c.buffer[:0]
+
+	if isET || c.isEOF {
+		goto loop
+	}
+
 	return nil
 }
 
@@ -126,16 +155,22 @@ func (el *eventloop) read(c *conn) error {
 const iovMax = 1024
 
 func (el *eventloop) write(c *conn) error {
-	iov := c.outboundBuffer.Peek(-1)
+	if c.outboundBuffer.IsEmpty() {
+		return nil
+	}
+
+	isET := el.engine.opts.EdgeTriggeredIO
 	var (
 		n   int
 		err error
 	)
+loop:
+	iov, _ := c.outboundBuffer.Peek(-1)
 	if len(iov) > 1 {
 		if len(iov) > iovMax {
 			iov = iov[:iovMax]
 		}
-		n, err = io.Writev(c.fd, iov)
+		n, err = gio.Writev(c.fd, iov)
 	} else {
 		n, err = unix.Write(c.fd, iov[0])
 	}
@@ -147,11 +182,14 @@ func (el *eventloop) write(c *conn) error {
 	default:
 		return el.close(c, os.NewSyscallError("write", err))
 	}
+	if isET && !c.outboundBuffer.IsEmpty() {
+		goto loop
+	}
 
-	// All data have been drained, it's no need to monitor the writable events,
-	// remove the writable event from poller to help the future event-loops.
-	if c.outboundBuffer.IsEmpty() {
-		_ = el.poller.ModRead(&c.pollAttachment)
+	// All data have been sent, it's no need to monitor the writable events for LT mode,
+	// remove the writable event from poller to help the future event-loops if necessary.
+	if !isET && c.outboundBuffer.IsEmpty() {
+		_ = el.poller.ModRead(&c.pollAttachment, false)
 	}
 
 	return nil
@@ -160,12 +198,12 @@ func (el *eventloop) write(c *conn) error {
 func (el *eventloop) close(c *conn, err error) (rerr error) {
 	if addr := c.localAddr; addr != nil && strings.HasPrefix(c.localAddr.Network(), "udp") {
 		rerr = el.poller.Delete(c.fd)
-		if c.fd != el.ln.fd {
+		if _, ok := el.listeners[c.fd]; !ok {
 			rerr = unix.Close(c.fd)
 			el.connections.delConn(c)
 		}
 		if el.eventHandler.OnClose(c, err) == Shutdown {
-			return gerrors.ErrEngineShutdown
+			return errorx.ErrEngineShutdown
 		}
 		c.release()
 		return
@@ -175,19 +213,16 @@ func (el *eventloop) close(c *conn, err error) (rerr error) {
 		return // ignore stale connections
 	}
 
-	// Send residual data in buffer back to the peer before actually closing the connection.
-	if !c.outboundBuffer.IsEmpty() {
-		for !c.outboundBuffer.IsEmpty() {
-			iov := c.outboundBuffer.Peek(0)
-			if len(iov) > iovMax {
-				iov = iov[:iovMax]
-			}
-			if n, e := io.Writev(c.fd, iov); e != nil {
-				el.getLogger().Warnf("close: error occurs when sending data back to peer, %v", e)
-				break
-			} else { //nolint:revive
-				_, _ = c.outboundBuffer.Discard(n)
-			}
+	// Send residual data in buffer back to the remote before actually closing the connection.
+	for !c.outboundBuffer.IsEmpty() {
+		iov, _ := c.outboundBuffer.Peek(0)
+		if len(iov) > iovMax {
+			iov = iov[:iovMax]
+		}
+		if n, e := gio.Writev(c.fd, iov); e != nil {
+			break
+		} else { //nolint:revive
+			_, _ = c.outboundBuffer.Discard(n)
 		}
 	}
 
@@ -206,7 +241,7 @@ func (el *eventloop) close(c *conn, err error) (rerr error) {
 
 	el.connections.delConn(c)
 	if el.eventHandler.OnClose(c, err) == Shutdown {
-		rerr = gerrors.ErrEngineShutdown
+		rerr = errorx.ErrEngineShutdown
 	}
 	c.release()
 
@@ -224,9 +259,6 @@ func (el *eventloop) wake(c *conn) error {
 }
 
 func (el *eventloop) ticker(ctx context.Context) {
-	if el == nil {
-		return
-	}
 	var (
 		action Action
 		delay  time.Duration
@@ -242,8 +274,10 @@ func (el *eventloop) ticker(ctx context.Context) {
 		switch action {
 		case None:
 		case Shutdown:
-			err := el.poller.UrgentTrigger(func(_ interface{}) error { return gerrors.ErrEngineShutdown }, nil)
-			el.getLogger().Debugf("stopping ticker in event-loop(%d) from OnTick(), UrgentTrigger:%v", el.idx, err)
+			// It seems reasonable to mark this as low-priority, waiting for some tasks like asynchronous writes
+			// to finish up before shutting down the service.
+			err := el.poller.Trigger(queue.LowPriority, func(_ interface{}) error { return errorx.ErrEngineShutdown }, nil)
+			el.getLogger().Debugf("failed to enqueue shutdown signal of high-priority for event-loop(%d): %v", el.idx, err)
 		}
 		if timer == nil {
 			timer = time.NewTimer(delay)
@@ -266,34 +300,34 @@ func (el *eventloop) handleAction(c *conn, action Action) error {
 	case Close:
 		return el.close(c, nil)
 	case Shutdown:
-		return gerrors.ErrEngineShutdown
+		return errorx.ErrEngineShutdown
 	default:
 		return nil
 	}
 }
 
-func (el *eventloop) readUDP(fd int, _ netpoll.IOEvent) error {
+func (el *eventloop) readUDP(fd int, _ netpoll.IOEvent, _ netpoll.IOFlags) error {
 	n, sa, err := unix.Recvfrom(fd, el.buffer, 0)
 	if err != nil {
-		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+		if err == unix.EAGAIN {
 			return nil
 		}
 		return fmt.Errorf("failed to read UDP packet from fd=%d in event-loop(%d), %v",
 			fd, el.idx, os.NewSyscallError("recvfrom", err))
 	}
 	var c *conn
-	if fd == el.ln.fd {
-		c = newUDPConn(fd, el, el.ln.addr, sa, false)
+	if ln, ok := el.listeners[fd]; ok {
+		c = newUDPConn(fd, el, ln.addr, sa, false)
 	} else {
 		c = el.connections.getConn(fd)
 	}
 	c.buffer = el.buffer[:n]
 	action := el.eventHandler.OnTraffic(c)
-	if c.peer != nil {
+	if c.remote != nil {
 		c.release()
 	}
 	if action == Shutdown {
-		return gerrors.ErrEngineShutdown
+		return errorx.ErrEngineShutdown
 	}
 	return nil
 }
@@ -303,7 +337,7 @@ func (el *eventloop) execCmd(itf interface{}) (err error) {
 	cmd := itf.(*asyncCmd)
 	c := el.connections.getConnByGFD(cmd.fd)
 	if c == nil || c.gfd != cmd.fd {
-		return gerrors.ErrInvalidConn
+		return errorx.ErrInvalidConn
 	}
 
 	defer func() {
@@ -322,7 +356,7 @@ func (el *eventloop) execCmd(itf interface{}) (err error) {
 	case asyncCmdWritev:
 		_, err = c.Writev(cmd.arg.([][]byte))
 	default:
-		return gerrors.ErrUnsupportedOp
+		return errorx.ErrUnsupportedOp
 	}
 	return
 }

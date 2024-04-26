@@ -16,25 +16,29 @@ package gnet
 
 import (
 	"context"
+	"errors"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
+	"github.com/panjf2000/gnet/v2/pkg/logging"
 )
 
 type engine struct {
-	ln         *listener
+	listeners  []*listener
 	opts       *Options     // options with engine
 	eventLoops loadBalancer // event-loops for handling events
 	ticker     struct {
 		ctx    context.Context
 		cancel context.CancelFunc
 	}
-	inShutdown int32 // whether the engine is in shutdown
-	workerPool struct {
+	inShutdown    int32 // whether the engine is in shutdown
+	beingShutdown int32 // whether the engine is being shutdown
+	workerPool    struct {
 		*errgroup.Group
 
 		shutdownCtx context.Context
@@ -50,10 +54,11 @@ func (eng *engine) isInShutdown() bool {
 
 // shutdown signals the engine to shut down.
 func (eng *engine) shutdown(err error) {
-	if err != nil && err != errorx.ErrEngineShutdown {
+	if err != nil && !errors.Is(err, errorx.ErrEngineShutdown) {
 		eng.opts.Logger.Errorf("engine is being shutdown with error: %v", err)
 	}
 	eng.workerPool.shutdown()
+	atomic.StoreInt32(&eng.beingShutdown, 1)
 }
 
 func (eng *engine) closeEventLoops() {
@@ -61,7 +66,9 @@ func (eng *engine) closeEventLoops() {
 		el.ch <- errorx.ErrEngineShutdown
 		return true
 	})
-	eng.ln.close()
+	for _, ln := range eng.listeners {
+		ln.close()
+	}
 }
 
 func (eng *engine) start(numEventLoop int) error {
@@ -83,7 +90,18 @@ func (eng *engine) start(numEventLoop int) error {
 		}
 	}
 
-	eng.workerPool.Go(eng.listen)
+	for _, ln := range eng.listeners {
+		l := ln
+		if l.pc != nil {
+			eng.workerPool.Go(func() error {
+				return eng.ListenUDP(l.pc)
+			})
+		} else {
+			eng.workerPool.Go(func() error {
+				return eng.listenStream(l.ln)
+			})
+		}
+	}
 
 	return nil
 }
@@ -91,7 +109,6 @@ func (eng *engine) start(numEventLoop int) error {
 func (eng *engine) stop(engine Engine) error {
 	<-eng.workerPool.shutdownCtx.Done()
 
-	eng.opts.Logger.Infof("engine is being shutdown...")
 	eng.eventHandler.OnShutdown(engine)
 
 	if eng.ticker.cancel != nil {
@@ -100,7 +117,7 @@ func (eng *engine) stop(engine Engine) error {
 
 	eng.closeEventLoops()
 
-	if err := eng.workerPool.Wait(); err != nil {
+	if err := eng.workerPool.Wait(); err != nil && !errors.Is(err, errorx.ErrEngineShutdown) {
 		eng.opts.Logger.Errorf("engine shutdown error: %v", err)
 	}
 
@@ -109,7 +126,7 @@ func (eng *engine) stop(engine Engine) error {
 	return nil
 }
 
-func run(eventHandler EventHandler, listener *listener, options *Options, protoAddr string) error {
+func run(eventHandler EventHandler, listeners []*listener, options *Options, addrs []string) error {
 	// Figure out the proper number of event-loops/goroutines to run.
 	numEventLoop := 1
 	if options.Multicore {
@@ -119,11 +136,14 @@ func run(eventHandler EventHandler, listener *listener, options *Options, protoA
 		numEventLoop = options.NumEventLoop
 	}
 
+	logging.Infof("Launching gnet with %d event-loops, listening on: %s",
+		numEventLoop, strings.Join(addrs, " | "))
+
 	shutdownCtx, shutdown := context.WithCancel(context.Background())
 	eng := engine{
 		opts:         options,
 		eventHandler: eventHandler,
-		ln:           listener,
+		listeners:    listeners,
 		workerPool: struct {
 			*errgroup.Group
 			shutdownCtx context.Context
@@ -135,6 +155,11 @@ func run(eventHandler EventHandler, listener *listener, options *Options, protoA
 	switch options.LB {
 	case RoundRobin:
 		eng.eventLoops = new(roundRobinLoadBalancer)
+		// If there are more than one listener, we can't use roundRobinLoadBalancer because
+		// it's not concurrency-safe, replace it with leastConnectionsLoadBalancer.
+		if len(listeners) > 1 {
+			eng.eventLoops = new(leastConnectionsLoadBalancer)
+		}
 	case LeastConnections:
 		eng.eventLoops = new(leastConnectionsLoadBalancer)
 	case SourceAddrHash:
@@ -158,7 +183,9 @@ func run(eventHandler EventHandler, listener *listener, options *Options, protoA
 	}
 	defer eng.stop(engine) //nolint:errcheck
 
-	allEngines.Store(protoAddr, &eng)
+	for _, addr := range addrs {
+		allEngines.Store(addr, &eng)
+	}
 
 	return nil
 }

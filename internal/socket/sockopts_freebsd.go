@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 The Gnet Authors. All rights reserved.
+ * Copyright (c) 2024 The Gnet Authors. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,15 @@
  *
  */
 
-package gnet
+package socket
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
 
-func setNonBlock(fd int, nonBlocking bool) error {
-	return unix.SetNonblock(fd, nonBlocking)
+	"golang.org/x/sys/unix"
+)
+
+// SetReuseport enables SO_REUSEPORT_LB option on socket.
+func SetReuseport(fd, reusePort int) error {
+	return os.NewSyscallError("setsockopt", unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT_LB, reusePort))
 }

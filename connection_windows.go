@@ -42,14 +42,21 @@ type udpConn struct {
 	c *conn
 }
 
+type openConn struct {
+	c          *conn
+	cb         func()
+	isDatagram bool
+}
+
 type conn struct {
+	pc            net.PacketConn
 	ctx           interface{}        // user-defined context
 	loop          *eventloop         // owner event-loop
 	buffer        *bbPool.ByteBuffer // reuse memory of inbound data as a temporary buffer
 	rawConn       net.Conn           // original connection
 	localAddr     net.Addr           // local server addr
-	remoteAddr    net.Addr           // remote peer addr
-	inboundBuffer elastic.RingBuffer // buffer for data from the peer
+	remoteAddr    net.Addr           // remote addr
+	inboundBuffer elastic.RingBuffer // buffer for data from the remote
 }
 
 func packTCPConn(c *conn, buf []byte) *tcpConn {
@@ -96,8 +103,9 @@ func (c *conn) release() {
 	c.buffer = nil
 }
 
-func newUDPConn(el *eventloop, localAddr, remoteAddr net.Addr) *conn {
+func newUDPConn(el *eventloop, pc net.PacketConn, localAddr, remoteAddr net.Addr) *conn {
 	return &conn{
+		pc:         pc,
 		loop:       el,
 		buffer:     bbPool.Get(),
 		localAddr:  localAddr,
@@ -111,6 +119,13 @@ func (c *conn) resetBuffer() {
 }
 
 func (c *conn) Read(p []byte) (n int, err error) {
+	if c.buffer == nil {
+		if len(p) == 0 {
+			return 0, nil
+		}
+		return 0, io.ErrShortBuffer
+	}
+
 	if c.inboundBuffer.IsEmpty() {
 		n = copy(p, c.buffer.B)
 		c.buffer.B = c.buffer.B[n:]
@@ -130,6 +145,13 @@ func (c *conn) Read(p []byte) (n int, err error) {
 }
 
 func (c *conn) Next(n int) (buf []byte, err error) {
+	if c.buffer == nil {
+		if n <= 0 {
+			return nil, nil
+		}
+		return nil, io.ErrShortBuffer
+	}
+
 	inBufferLen := c.inboundBuffer.Buffered()
 	if totalLen := inBufferLen + c.buffer.Len(); n > totalLen {
 		return nil, io.ErrShortBuffer
@@ -160,6 +182,13 @@ func (c *conn) Next(n int) (buf []byte, err error) {
 }
 
 func (c *conn) Peek(n int) (buf []byte, err error) {
+	if c.buffer == nil {
+		if n <= 0 {
+			return nil, nil
+		}
+		return nil, io.ErrShortBuffer
+	}
+
 	inBufferLen := c.inboundBuffer.Buffered()
 	if totalLen := inBufferLen + c.buffer.Len(); n > totalLen {
 		return nil, io.ErrShortBuffer
@@ -186,6 +215,10 @@ func (c *conn) Peek(n int) (buf []byte, err error) {
 }
 
 func (c *conn) Discard(n int) (int, error) {
+	if c.buffer == nil {
+		return 0, nil
+	}
+
 	inBufferLen := c.inboundBuffer.Buffered()
 	tempBufferLen := c.buffer.Len()
 	if inBufferLen+tempBufferLen < n || n <= 0 {
@@ -208,13 +241,13 @@ func (c *conn) Discard(n int) (int, error) {
 }
 
 func (c *conn) Write(p []byte) (int, error) {
-	if c.rawConn == nil && c.loop.eng.ln.pc == nil {
+	if c.rawConn == nil && c.pc == nil {
 		return 0, net.ErrClosed
 	}
 	if c.rawConn != nil {
 		return c.rawConn.Write(p)
 	}
-	return c.loop.eng.ln.pc.WriteTo(p, c.remoteAddr)
+	return c.pc.WriteTo(p, c.remoteAddr)
 }
 
 func (c *conn) Writev(bs [][]byte) (int, error) {
@@ -242,6 +275,10 @@ func (c *conn) WriteTo(w io.Writer) (n int64, err error) {
 			return
 		}
 	}
+
+	if c.buffer == nil {
+		return 0, nil
+	}
 	defer c.buffer.Reset()
 	return c.buffer.WriteTo(w)
 }
@@ -251,6 +288,9 @@ func (c *conn) Flush() error {
 }
 
 func (c *conn) InboundBuffered() int {
+	if c.buffer == nil {
+		return 0
+	}
 	return c.inboundBuffer.Buffered() + c.buffer.Len()
 }
 
@@ -281,7 +321,7 @@ func (c *conn) Fd() (fd int) {
 }
 
 func (c *conn) Dup() (fd int, err error) {
-	if c.rawConn == nil && c.loop.eng.ln.pc == nil {
+	if c.rawConn == nil && c.pc == nil {
 		return -1, net.ErrClosed
 	}
 
@@ -292,7 +332,7 @@ func (c *conn) Dup() (fd int, err error) {
 	if c.rawConn != nil {
 		sc, ok = c.rawConn.(syscall.Conn)
 	} else {
-		sc, ok = c.loop.eng.ln.pc.(syscall.Conn)
+		sc, ok = c.pc.(syscall.Conn)
 	}
 
 	if !ok {
@@ -327,24 +367,24 @@ func (c *conn) Dup() (fd int, err error) {
 }
 
 func (c *conn) SetReadBuffer(bytes int) error {
-	if c.rawConn == nil && c.loop.eng.ln.pc == nil {
+	if c.rawConn == nil && c.pc == nil {
 		return net.ErrClosed
 	}
 
 	if c.rawConn != nil {
 		return c.rawConn.(interface{ SetReadBuffer(int) error }).SetReadBuffer(bytes)
 	}
-	return c.loop.eng.ln.pc.(interface{ SetReadBuffer(int) error }).SetReadBuffer(bytes)
+	return c.pc.(interface{ SetReadBuffer(int) error }).SetReadBuffer(bytes)
 }
 
 func (c *conn) SetWriteBuffer(bytes int) error {
-	if c.rawConn == nil && c.loop.eng.ln.pc == nil {
+	if c.rawConn == nil && c.pc == nil {
 		return net.ErrClosed
 	}
 	if c.rawConn != nil {
 		return c.rawConn.(interface{ SetWriteBuffer(int) error }).SetWriteBuffer(bytes)
 	}
-	return c.loop.eng.ln.pc.(interface{ SetWriteBuffer(int) error }).SetWriteBuffer(bytes)
+	return c.pc.(interface{ SetWriteBuffer(int) error }).SetWriteBuffer(bytes)
 }
 
 func (c *conn) SetLinger(sec int) error {
