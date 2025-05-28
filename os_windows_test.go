@@ -1,5 +1,4 @@
 //go:build windows
-// +build windows
 
 package gnet
 
@@ -12,7 +11,7 @@ func SysClose(fd int) error {
 	return syscall.CloseHandle(syscall.Handle(fd))
 }
 
-func NetDial(network, addr string) (net.Conn, error) {
+func stdDial(network, addr string) (net.Conn, error) {
 	if network == "unix" {
 		laddr, _ := net.ResolveUnixAddr(network, unixAddr(addr))
 		raddr, _ := net.ResolveUnixAddr(network, addr)

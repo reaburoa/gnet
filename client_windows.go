@@ -25,6 +25,7 @@ import (
 
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/panjf2000/gnet/v2/pkg/pool/goroutine"
 )
 
 type Client struct {
@@ -48,20 +49,20 @@ func NewClient(eh EventHandler, opts ...Option) (cli *Client, err error) {
 	}
 	logging.SetDefaultLoggerAndFlusher(logger, logFlusher)
 
-	shutdownCtx, shutdown := context.WithCancel(context.Background())
+	rootCtx, shutdown := context.WithCancel(context.Background())
+	eg, ctx := errgroup.WithContext(rootCtx)
 	eng := &engine{
-		listeners: []*listener{},
-		opts:      options,
-		workerPool: struct {
-			*errgroup.Group
-			shutdownCtx context.Context
-			shutdown    context.CancelFunc
-			once        sync.Once
-		}{&errgroup.Group{}, shutdownCtx, shutdown, sync.Once{}},
+		listeners:    []*listener{},
+		opts:         options,
+		turnOff:      shutdown,
 		eventHandler: eh,
+		concurrency: struct {
+			*errgroup.Group
+			ctx context.Context
+		}{eg, ctx},
 	}
 	cli.el = &eventloop{
-		ch:           make(chan interface{}, 1024),
+		ch:           make(chan any, 1024),
 		eng:          eng,
 		connections:  make(map[*conn]struct{}),
 		eventHandler: eh,
@@ -71,11 +72,11 @@ func NewClient(eh EventHandler, opts ...Option) (cli *Client, err error) {
 
 func (cli *Client) Start() error {
 	cli.el.eventHandler.OnBoot(Engine{cli.el.eng})
-	cli.el.eng.workerPool.Go(cli.el.run)
+	cli.el.eng.concurrency.Go(cli.el.run)
 	if cli.opts.Ticker {
-		cli.el.eng.ticker.ctx, cli.el.eng.ticker.cancel = context.WithCancel(context.Background())
-		cli.el.eng.workerPool.Go(func() error {
-			cli.el.ticker(cli.el.eng.ticker.ctx)
+		ctx := cli.el.eng.concurrency.ctx
+		cli.el.eng.concurrency.Go(func() error {
+			cli.el.ticker(ctx)
 			return nil
 		})
 	}
@@ -85,10 +86,7 @@ func (cli *Client) Start() error {
 
 func (cli *Client) Stop() (err error) {
 	cli.el.ch <- errorx.ErrEngineShutdown
-	if cli.opts.Ticker {
-		cli.el.eng.ticker.cancel()
-	}
-	_ = cli.el.eng.workerPool.Wait()
+	err = cli.el.eng.concurrency.Wait()
 	cli.el.eventHandler.OnShutdown(Engine{cli.el.eng})
 	logging.Cleanup()
 	return
@@ -121,7 +119,7 @@ func (cli *Client) Dial(network, addr string) (Conn, error) {
 	return cli.DialContext(network, addr, nil)
 }
 
-func (cli *Client) DialContext(network, addr string, ctx interface{}) (Conn, error) {
+func (cli *Client) DialContext(network, addr string, ctx any) (Conn, error) {
 	var (
 		c   net.Conn
 		err error
@@ -146,7 +144,7 @@ func (cli *Client) Enroll(nc net.Conn) (gc Conn, err error) {
 	return cli.EnrollContext(nc, nil)
 }
 
-func (cli *Client) EnrollContext(nc net.Conn, ctx interface{}) (gc Conn, err error) {
+func (cli *Client) EnrollContext(nc net.Conn, ctx any) (gc Conn, err error) {
 	connOpened := make(chan struct{})
 	switch v := nc.(type) {
 	case *net.TCPConn:
@@ -164,61 +162,56 @@ func (cli *Client) EnrollContext(nc net.Conn, ctx interface{}) (gc Conn, err err
 			}
 		}
 
-		c := newTCPConn(nc, cli.el)
-		c.SetContext(ctx)
+		c := newTCPConn(cli.el, nc, ctx)
 		cli.el.ch <- &openConn{c: c, cb: func() { close(connOpened) }}
-		go func(c *conn, tc net.Conn, el *eventloop) {
+		goroutine.DefaultWorkerPool.Submit(func() {
 			var buffer [0x10000]byte
 			for {
-				n, err := tc.Read(buffer[:])
+				n, err := nc.Read(buffer[:])
 				if err != nil {
-					el.ch <- &netErr{c, err}
+					cli.el.ch <- &netErr{c, err}
 					return
 				}
-				el.ch <- packTCPConn(c, buffer[:n])
+				cli.el.ch <- packTCPConn(c, buffer[:n])
 			}
-		}(c, nc, cli.el)
+		})
 		gc = c
 	case *net.UnixConn:
-		c := newTCPConn(nc, cli.el)
-		c.SetContext(ctx)
+		c := newTCPConn(cli.el, nc, ctx)
 		cli.el.ch <- &openConn{c: c, cb: func() { close(connOpened) }}
-		go func(c *conn, uc net.Conn, el *eventloop) {
+		goroutine.DefaultWorkerPool.Submit(func() {
 			var buffer [0x10000]byte
 			for {
-				n, err := uc.Read(buffer[:])
+				n, err := nc.Read(buffer[:])
 				if err != nil {
-					el.ch <- &netErr{c, err}
+					cli.el.ch <- &netErr{c, err}
 					mu.RLock()
-					tmpDir := unixAddrDirs[uc.LocalAddr().String()]
+					tmpDir := unixAddrDirs[nc.LocalAddr().String()]
 					mu.RUnlock()
 					if err := os.RemoveAll(tmpDir); err != nil {
 						logging.Errorf("failed to remove temporary directory for unix local address: %v", err)
 					}
 					return
 				}
-				el.ch <- packTCPConn(c, buffer[:n])
+				cli.el.ch <- packTCPConn(c, buffer[:n])
 			}
-		}(c, nc, cli.el)
+		})
 		gc = c
 	case *net.UDPConn:
-		c := newUDPConn(cli.el, nil, nc.LocalAddr(), nc.RemoteAddr())
-		c.SetContext(ctx)
-		c.rawConn = nc
-		cli.el.ch <- &openConn{c: c, isDatagram: true, cb: func() { close(connOpened) }}
-		go func(uc net.Conn, el *eventloop) {
+		c := newUDPConn(cli.el, nil, nc, nc.LocalAddr(), nc.RemoteAddr(), ctx)
+		cli.el.ch <- &openConn{c: c, cb: func() { close(connOpened) }}
+		goroutine.DefaultWorkerPool.Submit(func() {
 			var buffer [0x10000]byte
 			for {
-				n, err := uc.Read(buffer[:])
+				n, err := nc.Read(buffer[:])
 				if err != nil {
+					cli.el.ch <- &netErr{c, err}
 					return
 				}
-				c := newUDPConn(cli.el, nil, uc.LocalAddr(), uc.RemoteAddr())
-				c.SetContext(ctx)
-				c.rawConn = uc
-				el.ch <- packUDPConn(c, buffer[:n])
+				c := newUDPConn(cli.el, nil, nc, nc.LocalAddr(), nc.RemoteAddr(), ctx)
+				cli.el.ch <- packUDPConn(c, buffer[:n])
 			}
-		}(nc, cli.el)
+		})
 		gc = c
 	default:
 		return nil, errorx.ErrUnsupportedProtocol

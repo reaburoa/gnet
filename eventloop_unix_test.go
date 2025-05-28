@@ -1,5 +1,4 @@
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
-// +build darwin dragonfly freebsd linux netbsd openbsd
 
 package gnet
 
@@ -15,6 +14,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/stretchr/testify/assert"
+
+	goPool "github.com/panjf2000/gnet/v2/pkg/pool/goroutine"
 )
 
 func (lb *roundRobinLoadBalancer) register(el *eventloop) {
@@ -48,7 +49,7 @@ var (
 func BenchmarkGC4El100k(b *testing.B) {
 	oldGc := debug.SetGCPercent(-1)
 
-	ts1 := benchServeGC(b, "tcp", ":9001", true, 4, 100000)
+	ts1 := benchServeGC(b, "tcp", ":0", true, 4, 100000)
 	b.Run("Run-4-eventloop-100000", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			runtime.GC()
@@ -62,7 +63,7 @@ func BenchmarkGC4El100k(b *testing.B) {
 func BenchmarkGC4El200k(b *testing.B) {
 	oldGc := debug.SetGCPercent(-1)
 
-	ts1 := benchServeGC(b, "tcp", ":9001", true, 4, 200000)
+	ts1 := benchServeGC(b, "tcp", ":0", true, 4, 200000)
 	b.Run("Run-4-eventloop-200000", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			runtime.GC()
@@ -76,7 +77,7 @@ func BenchmarkGC4El200k(b *testing.B) {
 func BenchmarkGC4El500k(b *testing.B) {
 	oldGc := debug.SetGCPercent(-1)
 
-	ts1 := benchServeGC(b, "tcp", ":9001", true, 4, 500000)
+	ts1 := benchServeGC(b, "tcp", ":0", true, 4, 500000)
 	b.Run("Run-4-eventloop-500000", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			runtime.GC()
@@ -99,7 +100,7 @@ func benchServeGC(b *testing.B, network, addr string, async bool, elNum int, ini
 	}
 
 	nowEventLoopInitConn = initConnCount
-	go func() {
+	_ = goPool.DefaultWorkerPool.Submit(func() {
 		err := Run(ts,
 			network+"://"+addr,
 			WithLockOSThread(async),
@@ -108,7 +109,7 @@ func benchServeGC(b *testing.B, network, addr string, async bool, elNum int, ini
 			WithTCPNoDelay(TCPDelay))
 		assert.NoError(b, err)
 		nowEventLoopInitConn = 0
-	}()
+	})
 	<-ts.initOk
 	return ts
 }
@@ -127,15 +128,12 @@ type benchmarkServerGC struct {
 
 func (s *benchmarkServerGC) OnBoot(eng Engine) (action Action) {
 	s.eng = eng
-	go func() {
-		for {
-			if s.eng.eng.eventLoops.len() == s.elNum && s.eng.CountConnections() == s.elNum*int(s.initConnCount) {
-				break
-			}
+	_ = goPool.DefaultWorkerPool.Submit(func() {
+		for s.eng.eng.eventLoops.len() != s.elNum || s.eng.CountConnections() != s.elNum*int(s.initConnCount) {
 			time.Sleep(time.Millisecond)
 		}
 		close(s.initOk)
-	}()
+	})
 	return
 }
 
@@ -146,73 +144,73 @@ func TestServeGC(t *testing.T) {
 			if testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 1, 10000)
+			testServeGC(t, "tcp", ":0", true, true, 1, 10000)
 		})
 		t.Run("1-loop-100000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 1, 100000)
+			testServeGC(t, "tcp", ":0", true, true, 1, 100000)
 		})
 		t.Run("1-loop-1000000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 1, 1000000)
+			testServeGC(t, "tcp", ":0", true, true, 1, 1000000)
 		})
 		t.Run("2-loop-10000", func(t *testing.T) {
 			if testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 2, 10000)
+			testServeGC(t, "tcp", ":0", true, true, 2, 10000)
 		})
 		t.Run("2-loop-100000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 2, 100000)
+			testServeGC(t, "tcp", ":0", true, true, 2, 100000)
 		})
 		t.Run("2-loop-1000000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 2, 1000000)
+			testServeGC(t, "tcp", ":0", true, true, 2, 1000000)
 		})
 		t.Run("4-loop-10000", func(t *testing.T) {
 			if testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 4, 10000)
+			testServeGC(t, "tcp", ":0", true, true, 4, 10000)
 		})
 		t.Run("4-loop-100000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 4, 100000)
+			testServeGC(t, "tcp", ":0", true, true, 4, 100000)
 		})
 		t.Run("4-loop-1000000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 4, 1000000)
+			testServeGC(t, "tcp", ":0", true, true, 4, 1000000)
 		})
 		t.Run("16-loop-10000", func(t *testing.T) {
 			if testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 16, 10000)
+			testServeGC(t, "tcp", ":0", true, true, 16, 10000)
 		})
 		t.Run("16-loop-100000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 16, 100000)
+			testServeGC(t, "tcp", ":0", true, true, 16, 100000)
 		})
 		t.Run("16-loop-1000000", func(t *testing.T) {
 			if !testBigGC {
 				t.Skipf("Skip when testBigGC=%t", testBigGC)
 			}
-			testServeGC(t, "tcp", ":9000", true, true, 16, 1000000)
+			testServeGC(t, "tcp", ":0", true, true, 16, 1000000)
 		})
 	})
 }
@@ -257,7 +255,10 @@ func (s *testServerGC) OnBoot(eng Engine) (action Action) {
 	if testBigGC {
 		gcSecs = 10
 	}
-	go s.GC(gcSecs)
+	err := goPool.DefaultWorkerPool.Submit(func() {
+		s.GC(gcSecs)
+	})
+	assert.NoError(s.tester, err)
 
 	return
 }
@@ -275,7 +276,7 @@ func (s *testServerGC) GC(secs int) {
 		runtime.GC()
 		gcTime := time.Since(now)
 		gcAllTime += gcTime
-		s.tester.Log(s.tester.Name(), s.network, " server gc:", gcTime, ", average gc time:", gcAllTime/gcAllCount)
+		s.tester.Log(s.tester.Name(), s.network, "server gc:", gcTime, "average gc time:", gcAllTime/gcAllCount)
 		if time.Since(gcStart) >= time.Second*time.Duration(secs) {
 			break
 		}

@@ -4,13 +4,17 @@
 <a title="Build Status" target="_blank" href="https://github.com/panjf2000/gnet/actions?query=workflow%3ATests"><img src="https://img.shields.io/github/actions/workflow/status/panjf2000/gnet/test.yml?branch=dev&style=flat-square&logo=github-actions" /></a>
 <a title="Codecov" target="_blank" href="https://codecov.io/gh/panjf2000/gnet"><img src="https://img.shields.io/codecov/c/github/panjf2000/gnet?style=flat-square&logo=codecov" /></a>
 <a title="Supported Platforms" target="_blank" href="https://github.com/panjf2000/gnet"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20*BSD%20%7C%20Windows-549688?style=flat-square&logo=launchpad" /></a>
-<a title="Require Go Version" target="_blank" href="https://github.com/panjf2000/gnet"><img src="https://img.shields.io/badge/go-%3E%3D1.17-30dff3?style=flat-square&logo=go" /></a>
+<a title="Minimum Go Version" target="_blank" href="https://github.com/panjf2000/gnet"><img src="https://img.shields.io/badge/go-%3E%3D1.20-30dff3?style=flat-square&logo=go" /></a>
 <br />
 <a title="Go Report Card" target="_blank" href="https://goreportcard.com/report/github.com/panjf2000/gnet"><img src="https://goreportcard.com/badge/github.com/panjf2000/gnet?style=flat-square" /></a>
 <a title="Doc for gnet" target="_blank" href="https://pkg.go.dev/github.com/panjf2000/gnet/v2#section-documentation"><img src="https://img.shields.io/badge/go.dev-doc-007d9c?style=flat-square&logo=read-the-docs" /></a>
 <a title="Mentioned in Awesome Go" target="_blank" href="https://github.com/avelino/awesome-go#networking"><img src="https://awesome.re/mentioned-badge-flat.svg" /></a>
 <a title="Release" target="_blank" href="https://github.com/panjf2000/gnet/releases"><img src="https://img.shields.io/github/v/release/panjf2000/gnet.svg?color=161823&style=flat-square&logo=smartthings" /></a>
 <a title="Tag" target="_blank" href="https://github.com/panjf2000/gnet/tags"><img src="https://img.shields.io/github/v/tag/panjf2000/gnet?color=%23ff8936&logo=fitbit&style=flat-square" /></a>
+</p>
+
+<p align="center">
+<a href="https://trendshift.io/repositories/9602" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9602" alt="panjf2000%2Fgnet | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 </p>
 
 English | [中文](README_ZH.md)
@@ -21,15 +25,17 @@ English | [中文](README_ZH.md)
 
 `gnet` is an event-driven networking framework that is ultra-fast and lightweight. It is built from scratch by exploiting [epoll](https://man7.org/linux/man-pages/man7/epoll.7.html) and [kqueue](https://en.wikipedia.org/wiki/Kqueue) and it can achieve much higher performance with lower memory consumption than Go [net](https://golang.org/pkg/net/) in many specific scenarios.
 
-`gnet` and [net](https://golang.org/pkg/net/) don't share the same philosophy about network programming. Thus, building network applications with `gnet` can be significantly different from building them with [net](https://golang.org/pkg/net/), and the philosophies can't be harmonized. There are other similar products written in other programming languages in the community, such as [libevent](https://github.com/libevent/libevent), [libuv](https://github.com/libuv/libuv), [netty](https://github.com/netty/netty), [twisted](https://github.com/twisted/twisted), [tornado](https://github.com/tornadoweb/tornado), etc. which work in a similar pattern as `gnet` under the hood.
+`gnet` and [net](https://golang.org/pkg/net/) don't share the same philosophy in network programming. Thus, building network applications with `gnet` can be significantly different from building them with [net](https://golang.org/pkg/net/), and the philosophies can't be reconciled. There are other similar products written in other programming languages in the community, such as [libuv](https://github.com/libuv/libuv), [netty](https://github.com/netty/netty), [twisted](https://github.com/twisted/twisted), [tornado](https://github.com/tornadoweb/tornado), etc. which work in a similar pattern as `gnet` under the hood.
 
-`gnet` is not designed to displace the Go [net](https://golang.org/pkg/net/), but to create an alternative in the Go ecosystem for building performance-critical network services. As a result of which, `gnet` is not as comprehensive as Go [net](https://golang.org/pkg/net/), it provides only the core functionalities (in a concise API set) required by a network application and it is not planned on being a coverall networking framework, as I think [net](https://golang.org/pkg/net/) has done a good enough job in that area.
+`gnet` is not designed to displace the Go [net](https://golang.org/pkg/net/), but to create an alternative in the Go ecosystem for building performance-critical network services. As a result of which, `gnet` is not as comprehensive as Go [net](https://golang.org/pkg/net/), it provides only the core functionality (via a concise set of APIs) required by a network application and it doesn't plan on becoming a coverall networking framework, as I think Go [net](https://golang.org/pkg/net/) has done a good enough job in that area.
 
 `gnet` sells itself as a high-performance, lightweight, non-blocking, event-driven networking framework written in pure Go which works on the transport layer with TCP/UDP protocols and Unix Domain Socket. It enables developers to implement their own protocols(HTTP, RPC, WebSocket, Redis, etc.) of application layer upon `gnet` for building diversified network services. For instance, you get an HTTP Server if you implement HTTP protocol upon `gnet` while you have a Redis Server done with the implementation of Redis protocol upon `gnet` and so on.
 
 **`gnet` derives from the project: `evio` with much higher performance and more features.**
 
 # 🚀 Features
+
+## 🦖 Milestone
 
 - [x] [High-performance](#-performance) event-driven looping based on a networking model of multiple threads/goroutines
 - [x] Built-in goroutine pool powered by the library [ants](https://github.com/panjf2000/ants)
@@ -43,8 +49,13 @@ English | [中文](README_ZH.md)
 - [x] Running on `Linux`, `macOS`, `Windows`, and *BSD: `Darwin`/`DragonFlyBSD`/`FreeBSD`/`NetBSD`/`OpenBSD`
 - [x] **Edge-triggered** I/O support
 - [x] Multiple network addresses binding
+- [x] Support registering new connections to event-loops
+
+## 🕊 Roadmap
+
 - [ ] **TLS** support
-- [ ] [io_uring](https://kernel.dk/io_uring.pdf) support
+- [ ] [io_uring](https://github.com/axboe/liburing/wiki/io_uring-and-networking-in-2023) support
+- [ ] **KCP** support
 
 ***Windows version of `gnet` should only be used in development for developing and testing, it shouldn't be used in production.***
 
@@ -52,7 +63,7 @@ English | [中文](README_ZH.md)
 
 `gnet` is available as a Go module and we highly recommend that you use `gnet` via [Go Modules](https://go.dev/blog/using-go-modules), with Go 1.11 Modules enabled (Go 1.11+), you can just simply add `import "github.com/panjf2000/gnet/v2"` to the codebase and run `go mod download/go mod tidy` or `go [build|run|test]` to download the necessary dependencies automatically.
 
-## With v2 
+## With v2
 
 ```bash
 go get -u github.com/panjf2000/gnet/v2
@@ -66,11 +77,65 @@ go get -u github.com/panjf2000/gnet
 
 # 🎡 Use cases
 
-The following companies/organizations use `gnet` as the underlying network service in production.
+The following corporations/organizations use `gnet` as the underlying network service in production.
 
-<a href="https://www.tencent.com"><img src="https://res.strikefreedom.top/static_res/logos/tencent_logo.png" width="250" align="middle"/></a>&nbsp;&nbsp;<a href="https://www.iqiyi.com" target="_blank"><img src="https://res.strikefreedom.top/static_res/logos/iqiyi-logo.png" width="200" align="middle"/></a>&nbsp;&nbsp;<a href="https://www.mi.com" target="_blank"><img src="https://res.strikefreedom.top/static_res/logos/mi-logo.png" width="150" align="middle"/></a>&nbsp;&nbsp;<a href="https://www.360.com" target="_blank"><img src="https://res.strikefreedom.top/static_res/logos/360-logo.png" width="200" align="middle"/></a>&nbsp;&nbsp;<a href="https://tieba.baidu.com/" target="_blank"><img src="https://res.strikefreedom.top/static_res/logos/baidu-tieba-logo.png" width="200" align="middle"/></a>&nbsp;&nbsp;<a href="https://game.qq.com/" target="_blank"><img src="https://res.strikefreedom.top/static_res/logos/tencent-games-logo.jpeg" width="200" align="middle"/></a>
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://www.tencent.com/">
+          <img src="https://res.strikefreedom.top/static_res/logos/tencent_logo.png" width="200" />
+        </a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://www.tencentgames.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/tencent-games-logo.jpeg" width="200" />
+        </a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://www.iqiyi.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/iqiyi-logo.png" width="200" />
+        </a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://www.mi.com/global/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/mi-logo.png" width="200" />
+        </a>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://www.360.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/360-logo.png" width="200" />
+        </a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://tieba.baidu.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/baidu-tieba-logo.png" width="200" />
+        </a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://www.jd.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/jd-logo.png" width="200" />
+        </a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://www.zuoyebang.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/zuoyebang-logo.jpeg" width="200" />
+        </a>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://www.bytedance.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/ByteDance_Logo.png" width="250" />
+        </a>
+      </td>
+    </tr>
+  </tbody>
+</table>
 
-If you have `gnet` integrated into projects, feel free to open a pull request refreshing this list.
+If you're also using `gnet` in production, please help us enrich this list by opening a pull request.
 
 # 📊 Performance
 
@@ -160,7 +225,7 @@ The source code of `gnet` should be distributed under the Apache-2.0 license.
 Please read the [Contributing Guidelines](CONTRIBUTING.md) before opening a PR and thank you to all the developers who already made contributions to `gnet`!
 
 <a href="https://github.com/panjf2000/gnet/graphs/contributors">
-	<img src="https://contrib.rocks/image?repo=panjf2000/gnet" />
+  <img src="https://contrib.rocks/image?repo=panjf2000/gnet" />
 </a>
 
 # ⚓ Relevant Articles
@@ -191,20 +256,16 @@ Become a bronze sponsor with a monthly donation of $10 and get your logo on our 
 <img src="https://raw.githubusercontent.com/panjf2000/illustrations/master/payments/AliPay.JPG" width="250" align="middle"/>&nbsp;&nbsp;
 <a href="https://www.paypal.me/R136a1X" target="_blank"><img src="https://raw.githubusercontent.com/panjf2000/illustrations/master/payments/PayPal.JPG" width="250" align="middle"/></a>&nbsp;&nbsp;
 
-# 💴 Patrons
-
-<a target="_blank" href="https://github.com/patrick-othmer"><img src="https://avatars1.githubusercontent.com/u/8964313" width="100" alt="Patrick Othmer" /></a>&nbsp;<a target="_blank" href="https://github.com/panjf2000/gnet"><img src="https://avatars2.githubusercontent.com/u/50285334" width="100" alt="Jimmy" /></a>&nbsp;<a target="_blank" href="https://github.com/cafra"><img src="https://avatars0.githubusercontent.com/u/13758306" width="100" alt="ChenZhen" /></a>&nbsp;<a target="_blank" href="https://github.com/yangwenmai"><img src="https://avatars0.githubusercontent.com/u/1710912" width="100" alt="Mai Yang" /></a>&nbsp;<a target="_blank" href="https://github.com/BeijingWks"><img src="https://avatars3.githubusercontent.com/u/33656339" width="100" alt="王开帅" /></a>&nbsp;<a target="_blank" href="https://github.com/refs"><img src="https://avatars3.githubusercontent.com/u/6905948" width="100" alt="Unger Alejandro" /></a>&nbsp;<a target="_blank" href="https://github.com/Swaggadan"><img src="https://avatars.githubusercontent.com/u/137142" width="100" alt="Swaggadan" /></a>&nbsp;<a target="_blank" href="https://github.com/Wuvist"><img src="https://avatars.githubusercontent.com/u/657796" width="100" alt="Weng Wei" /></a>
-
 # 🔑 JetBrains OS licenses
 
-`gnet` had been being developed with `GoLand` IDE under the **free JetBrains Open Source license(s)** granted by JetBrains s.r.o., hence I would like to express my thanks here.
+`gnet` has been being developed with `GoLand` IDE under the ***free JetBrains Open Source license(s)*** granted by JetBrains s.r.o., hence I would like to express my thanks here.
 
-<a href="https://www.jetbrains.com/?from=gnet" target="_blank"><img src="https://raw.githubusercontent.com/panjf2000/illustrations/master/jetbrains/jetbrains-variant-4.png" width="250" align="middle"/></a>
+<a href="https://www.jetbrains.com/?from=gnet" target="_blank"><img src="https://resources.jetbrains.com/storage/products/company/brand/logos/jetbrains.svg" alt="JetBrains logo."></a>
 
 # 🔋 Sponsorship
 
 <p>
-	<h3>This project is supported by:</h3>
-	<a href="https://www.digitalocean.com/"><img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/SVG/DO_Logo_horizontal_blue.svg" width="201px" />
-	</a>
+  <h3>This project is supported by:</h3>
+  <a href="https://www.digitalocean.com/"><img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/SVG/DO_Logo_horizontal_blue.svg" width="201px" />
+  </a>
 </p>

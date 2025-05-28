@@ -18,9 +18,9 @@ import (
 	"errors"
 	"net"
 	"runtime"
-	"sync/atomic"
 
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
+	"github.com/panjf2000/gnet/v2/pkg/pool/goroutine"
 )
 
 func (eng *engine) listenStream(ln net.Listener) (err error) {
@@ -36,21 +36,17 @@ func (eng *engine) listenStream(ln net.Listener) (err error) {
 		tc, e := ln.Accept()
 		if e != nil {
 			err = e
-			if atomic.LoadInt32(&eng.beingShutdown) == 0 {
+			if !eng.beingShutdown.Load() {
 				eng.opts.Logger.Errorf("Accept() fails due to error: %v", err)
 			} else if errors.Is(err, net.ErrClosed) {
-				err = errorx.ErrEngineShutdown
-				// TODO: errors.Join() is not supported until Go 1.20,
-				// 	we will uncomment this line after we bump up the
-				// 	minimal supported go version to 1.20.
-				// err = errors.Join(err, errorx.ErrEngineShutdown)
+				err = errors.Join(err, errorx.ErrEngineShutdown)
 			}
 			return
 		}
 		el := eng.eventLoops.next(tc.RemoteAddr())
-		c := newTCPConn(tc, el)
+		c := newTCPConn(el, tc, nil)
 		el.ch <- &openConn{c: c}
-		go func(c *conn, tc net.Conn, el *eventloop) {
+		goroutine.DefaultWorkerPool.Submit(func() {
 			var buffer [0x10000]byte
 			for {
 				n, err := tc.Read(buffer[:])
@@ -60,7 +56,7 @@ func (eng *engine) listenStream(ln net.Listener) (err error) {
 				}
 				el.ch <- packTCPConn(c, buffer[:n])
 			}
-		}(c, tc, el)
+		})
 	}
 }
 
@@ -78,17 +74,15 @@ func (eng *engine) ListenUDP(pc net.PacketConn) (err error) {
 		n, addr, e := pc.ReadFrom(buffer[:])
 		if e != nil {
 			err = e
-			if atomic.LoadInt32(&eng.beingShutdown) == 0 {
+			if !eng.beingShutdown.Load() {
 				eng.opts.Logger.Errorf("failed to receive data from UDP fd due to error:%v", err)
 			} else if errors.Is(err, net.ErrClosed) {
-				err = errorx.ErrEngineShutdown
-				// TODO: ditto.
-				// err = errors.Join(err, errorx.ErrEngineShutdown)
+				err = errors.Join(err, errorx.ErrEngineShutdown)
 			}
 			return
 		}
 		el := eng.eventLoops.next(addr)
-		c := newUDPConn(el, pc, pc.LocalAddr(), addr)
+		c := newUDPConn(el, pc, nil, pc.LocalAddr(), addr, nil)
 		el.ch <- packUDPConn(c, buffer[:n])
 	}
 }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
-// +build darwin dragonfly freebsd linux netbsd openbsd
 
 package gnet
 
@@ -22,28 +21,27 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/panjf2000/gnet/v2/internal/netpoll"
-	"github.com/panjf2000/gnet/v2/internal/queue"
-	"github.com/panjf2000/gnet/v2/internal/socket"
 	"github.com/panjf2000/gnet/v2/pkg/errors"
+	"github.com/panjf2000/gnet/v2/pkg/netpoll"
+	"github.com/panjf2000/gnet/v2/pkg/queue"
+	"github.com/panjf2000/gnet/v2/pkg/socket"
 )
 
 func (el *eventloop) accept0(fd int, _ netpoll.IOEvent, _ netpoll.IOFlags) error {
 	for {
 		nfd, sa, err := socket.Accept(fd)
-		if err != nil {
-			switch err {
-			case unix.EAGAIN: // the Accept queue has been drained out, we can return now
-				return nil
-			case unix.EINTR, unix.ECONNRESET, unix.ECONNABORTED:
-				// ECONNRESET or ECONNABORTED could indicate that a socket
-				// in the Accept queue was closed before we Accept()ed it.
-				// It's a silly error, let's retry it.
-				continue
-			default:
-				el.getLogger().Errorf("Accept() failed due to error: %v", err)
-				return errors.ErrAcceptSocket
-			}
+		switch err {
+		case nil:
+		case unix.EAGAIN: // the Accept queue has been drained out, we can return now
+			return nil
+		case unix.EINTR, unix.ECONNRESET, unix.ECONNABORTED:
+			// ECONNRESET or ECONNABORTED could indicate that a socket
+			// in the Accept queue was closed before we Accept()ed it.
+			// It's a silly error, let's retry it.
+			continue
+		default:
+			el.getLogger().Errorf("Accept() failed due to error: %v", err)
+			return errors.ErrAcceptSocket
 		}
 
 		remoteAddr := socket.SockaddrToTCPOrUnixAddr(sa)
@@ -71,17 +69,16 @@ func (el *eventloop) accept(fd int, ev netpoll.IOEvent, flags netpoll.IOFlags) e
 	}
 
 	nfd, sa, err := socket.Accept(fd)
-	if err != nil {
-		switch err {
-		case unix.EINTR, unix.EAGAIN, unix.ECONNRESET, unix.ECONNABORTED:
-			// ECONNRESET or ECONNABORTED could indicate that a socket
-			// in the Accept queue was closed before we Accept()ed it.
-			// It's a silly error, let's retry it.
-			return nil
-		default:
-			el.getLogger().Errorf("Accept() failed due to error: %v", err)
-			return errors.ErrAcceptSocket
-		}
+	switch err {
+	case nil:
+	case unix.EINTR, unix.EAGAIN, unix.ECONNRESET, unix.ECONNABORTED:
+		// ECONNRESET or ECONNABORTED could indicate that a socket
+		// in the Accept queue was closed before we Accept()ed it.
+		// It's a silly error, let's retry it.
+		return nil
+	default:
+		el.getLogger().Errorf("Accept() failed due to error: %v", err)
+		return errors.ErrAcceptSocket
 	}
 
 	remoteAddr := socket.SockaddrToTCPOrUnixAddr(sa)

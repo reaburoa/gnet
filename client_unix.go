@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
-// +build darwin dragonfly freebsd linux netbsd openbsd
 
 package gnet
 
@@ -22,19 +21,18 @@ import (
 	"errors"
 	"net"
 	"strconv"
-	"sync"
 	"syscall"
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 
-	"github.com/panjf2000/gnet/v2/internal/math"
-	"github.com/panjf2000/gnet/v2/internal/netpoll"
-	"github.com/panjf2000/gnet/v2/internal/queue"
-	"github.com/panjf2000/gnet/v2/internal/socket"
 	"github.com/panjf2000/gnet/v2/pkg/buffer/ring"
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/panjf2000/gnet/v2/pkg/math"
+	"github.com/panjf2000/gnet/v2/pkg/netpoll"
+	"github.com/panjf2000/gnet/v2/pkg/queue"
+	"github.com/panjf2000/gnet/v2/pkg/socket"
 )
 
 // Client of gnet.
@@ -66,25 +64,29 @@ func NewClient(eh EventHandler, opts ...Option) (cli *Client, err error) {
 		return
 	}
 
-	shutdownCtx, shutdown := context.WithCancel(context.Background())
+	rootCtx, shutdown := context.WithCancel(context.Background())
+	eg, ctx := errgroup.WithContext(rootCtx)
 	eng := engine{
 		listeners:    make(map[int]*listener),
 		opts:         options,
+		turnOff:      shutdown,
 		eventHandler: eh,
-		workerPool: struct {
+		concurrency: struct {
 			*errgroup.Group
-			shutdownCtx context.Context
-			shutdown    context.CancelFunc
-			once        sync.Once
-		}{&errgroup.Group{}, shutdownCtx, shutdown, sync.Once{}},
-	}
-	if options.Ticker {
-		eng.ticker.ctx, eng.ticker.cancel = context.WithCancel(context.Background())
+			ctx context.Context
+		}{eg, ctx},
 	}
 	el := eventloop{
 		listeners: eng.listeners,
 		engine:    &eng,
 		poller:    p,
+	}
+
+	if options.EdgeTriggeredIOChunk > 0 {
+		options.EdgeTriggeredIO = true
+		options.EdgeTriggeredIOChunk = math.CeilToPowerOfTwo(options.EdgeTriggeredIOChunk)
+	} else if options.EdgeTriggeredIO {
+		options.EdgeTriggeredIOChunk = 1 << 20 // 1MB
 	}
 
 	rbc := options.ReadBufferCap
@@ -117,10 +119,14 @@ func NewClient(eh EventHandler, opts ...Option) (cli *Client, err error) {
 func (cli *Client) Start() error {
 	logging.Infof("Starting gnet client with 1 event-loop")
 	cli.el.eventHandler.OnBoot(Engine{cli.el.engine})
-	cli.el.engine.workerPool.Go(cli.el.run)
+	cli.el.engine.concurrency.Go(cli.el.run)
 	// Start the ticker.
 	if cli.opts.Ticker {
-		go cli.el.ticker(cli.el.engine.ticker.ctx)
+		ctx := cli.el.engine.concurrency.ctx
+		cli.el.engine.concurrency.Go(func() error {
+			cli.el.ticker(ctx)
+			return nil
+		})
 	}
 	logging.Debugf("default logging level is %s", logging.LogLevel())
 	return nil
@@ -128,12 +134,8 @@ func (cli *Client) Start() error {
 
 // Stop stops the client event-loop.
 func (cli *Client) Stop() (err error) {
-	logging.Error(cli.el.poller.Trigger(queue.HighPriority, func(_ interface{}) error { return errorx.ErrEngineShutdown }, nil))
-	// Stop the ticker.
-	if cli.opts.Ticker {
-		cli.el.engine.ticker.cancel()
-	}
-	_ = cli.el.engine.workerPool.Wait()
+	logging.Error(cli.el.poller.Trigger(queue.HighPriority, func(_ any) error { return errorx.ErrEngineShutdown }, nil))
+	err = cli.el.engine.concurrency.Wait()
 	logging.Error(cli.el.poller.Close())
 	cli.el.eventHandler.OnShutdown(Engine{cli.el.engine})
 	logging.Cleanup()
@@ -146,7 +148,7 @@ func (cli *Client) Dial(network, address string) (Conn, error) {
 }
 
 // DialContext is like Dial but also accepts an empty interface ctx that can be obtained later via Conn.Context.
-func (cli *Client) DialContext(network, address string, ctx interface{}) (Conn, error) {
+func (cli *Client) DialContext(network, address string, ctx any) (Conn, error) {
 	c, err := net.Dial(network, address)
 	if err != nil {
 		return nil, err
@@ -160,8 +162,8 @@ func (cli *Client) Enroll(c net.Conn) (Conn, error) {
 }
 
 // EnrollContext is like Enroll but also accepts an empty interface ctx that can be obtained later via Conn.Context.
-func (cli *Client) EnrollContext(c net.Conn, ctx interface{}) (Conn, error) {
-	defer c.Close()
+func (cli *Client) EnrollContext(c net.Conn, ctx any) (Conn, error) {
+	defer c.Close() //nolint:errcheck
 
 	sc, ok := c.(syscall.Conn)
 	if !ok {
@@ -200,15 +202,16 @@ func (cli *Client) EnrollContext(c net.Conn, ctx interface{}) (Conn, error) {
 	)
 	switch c.(type) {
 	case *net.UnixConn:
-		if sockAddr, _, _, err = socket.GetUnixSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String()); err != nil {
+		sockAddr, _, _, err = socket.GetUnixSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String())
+		if err != nil {
 			return nil, err
 		}
 		ua := c.LocalAddr().(*net.UnixAddr)
 		ua.Name = c.RemoteAddr().String() + "." + strconv.Itoa(dupFD)
 		gc = newTCPConn(dupFD, cli.el, sockAddr, c.LocalAddr(), c.RemoteAddr())
 	case *net.TCPConn:
-		if cli.opts.TCPNoDelay == TCPDelay {
-			if err = socket.SetNoDelay(dupFD, 0); err != nil {
+		if cli.opts.TCPNoDelay == TCPNoDelay {
+			if err = socket.SetNoDelay(dupFD, 1); err != nil {
 				return nil, err
 			}
 		}
@@ -217,12 +220,14 @@ func (cli *Client) EnrollContext(c net.Conn, ctx interface{}) (Conn, error) {
 				return nil, err
 			}
 		}
-		if sockAddr, _, _, _, err = socket.GetTCPSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String()); err != nil {
+		sockAddr, _, _, _, err = socket.GetTCPSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String())
+		if err != nil {
 			return nil, err
 		}
 		gc = newTCPConn(dupFD, cli.el, sockAddr, c.LocalAddr(), c.RemoteAddr())
 	case *net.UDPConn:
-		if sockAddr, _, _, _, err = socket.GetUDPSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String()); err != nil {
+		sockAddr, _, _, _, err = socket.GetUDPSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String())
+		if err != nil {
 			return nil, err
 		}
 		gc = newUDPConn(dupFD, cli.el, c.LocalAddr(), sockAddr, true)
@@ -237,7 +242,7 @@ func (cli *Client) EnrollContext(c net.Conn, ctx interface{}) (Conn, error) {
 	}}
 	err = cli.el.poller.Trigger(queue.HighPriority, cli.el.register, ccb)
 	if err != nil {
-		gc.Close()
+		gc.Close() //nolint:errcheck
 		return nil, err
 	}
 

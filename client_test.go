@@ -1,20 +1,21 @@
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || windows
-// +build darwin dragonfly freebsd linux netbsd openbsd windows
 
 package gnet
 
 import (
 	"bytes"
+	crand "crypto/rand"
 	"io"
 	"math/rand"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
@@ -37,7 +38,12 @@ type clientEvents struct {
 
 func (ev *clientEvents) OnBoot(e Engine) Action {
 	fd, err := e.Dup()
-	require.ErrorIsf(ev.tester, err, errorx.ErrEmptyEngine, "expected error: %v, but got: %v",
+	assert.ErrorIsf(ev.tester, err, errorx.ErrEmptyEngine, "expected error: %v, but got: %v",
+		errorx.ErrUnsupportedOp, err)
+	assert.EqualValuesf(ev.tester, fd, -1, "expected -1, but got: %d", fd)
+
+	fd, err = e.DupListener("tcp", "abc")
+	assert.ErrorIsf(ev.tester, err, errorx.ErrEmptyEngine, "expected error: %v, but got: %v",
 		errorx.ErrUnsupportedOp, err)
 	assert.EqualValuesf(ev.tester, fd, -1, "expected -1, but got: %d", fd)
 	return None
@@ -82,7 +88,12 @@ func (ev *clientEvents) OnTick() (delay time.Duration, action Action) {
 
 func (ev *clientEvents) OnShutdown(e Engine) {
 	fd, err := e.Dup()
-	require.ErrorIsf(ev.tester, err, errorx.ErrEmptyEngine, "expected error: %v, but got: %v",
+	assert.ErrorIsf(ev.tester, err, errorx.ErrEmptyEngine, "expected error: %v, but got: %v",
+		errorx.ErrUnsupportedOp, err)
+	assert.EqualValuesf(ev.tester, fd, -1, "expected -1, but got: %d", fd)
+
+	fd, err = e.DupListener("tcp", "abc")
+	assert.ErrorIsf(ev.tester, err, errorx.ErrEmptyEngine, "expected error: %v, but got: %v",
 		errorx.ErrUnsupportedOp, err)
 	assert.EqualValuesf(ev.tester, fd, -1, "expected -1, but got: %d", fd)
 }
@@ -97,50 +108,50 @@ func TestClient(t *testing.T) {
 	t.Run("poll-LT", func(t *testing.T) {
 		t.Run("tcp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", false, false, false, false, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{false, 0, false, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", false, false, true, false, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{false, 0, false, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("tcp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", false, false, false, true, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{false, 0, false, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", false, false, true, true, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{false, 0, false, true, true, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", false, false, false, false, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{false, 0, false, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", false, false, true, false, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{false, 0, false, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", false, false, false, true, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{false, 0, false, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", false, false, true, true, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{false, 0, false, true, true, false, 10, LeastConnections})
 			})
 		})
 		t.Run("unix", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", false, false, false, false, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{false, 0, false, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", false, false, true, false, 10, SourceAddrHash)
+				runClient(t, "unix", "gnet2.sock", &testConf{false, 0, false, true, false, false, 10, SourceAddrHash})
 			})
 		})
 		t.Run("unix-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", false, false, false, true, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{false, 0, false, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", false, false, true, true, 10, SourceAddrHash)
+				runClient(t, "unix", "gnet2.sock", &testConf{false, 0, false, true, true, false, 10, SourceAddrHash})
 			})
 		})
 	})
@@ -148,50 +159,101 @@ func TestClient(t *testing.T) {
 	t.Run("poll-ET", func(t *testing.T) {
 		t.Run("tcp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", true, false, false, false, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{true, 0, false, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", true, false, true, false, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{true, 0, false, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("tcp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", true, false, false, true, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{true, 0, false, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", true, false, true, true, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{true, 0, false, true, true, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", true, false, false, false, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{true, 0, false, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", true, false, true, false, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{true, 0, false, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", true, false, false, true, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{true, 0, false, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", true, false, true, true, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{true, 0, false, true, true, false, 10, LeastConnections})
 			})
 		})
 		t.Run("unix", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", true, false, false, false, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{true, 0, false, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", true, false, true, false, 10, SourceAddrHash)
+				runClient(t, "unix", "gnet2.sock", &testConf{true, 0, false, true, false, false, 10, SourceAddrHash})
 			})
 		})
 		t.Run("unix-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", true, false, false, true, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{true, 0, false, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", true, false, true, true, 10, SourceAddrHash)
+				runClient(t, "unix", "gnet2.sock", &testConf{true, 0, false, true, true, false, 10, SourceAddrHash})
+			})
+		})
+	})
+
+	t.Run("poll-ET-chunk", func(t *testing.T) {
+		t.Run("tcp", func(t *testing.T) {
+			t.Run("1-loop", func(t *testing.T) {
+				runClient(t, "tcp", ":9991", &testConf{true, 1 << 18, false, false, false, false, 10, RoundRobin})
+			})
+			t.Run("N-loop", func(t *testing.T) {
+				runClient(t, "tcp", ":9992", &testConf{true, 1 << 19, false, true, false, false, 10, LeastConnections})
+			})
+		})
+		t.Run("tcp-async", func(t *testing.T) {
+			t.Run("1-loop", func(t *testing.T) {
+				runClient(t, "tcp", ":9991", &testConf{true, 1 << 18, false, false, true, false, 10, RoundRobin})
+			})
+			t.Run("N-loop", func(t *testing.T) {
+				runClient(t, "tcp", ":9992", &testConf{true, 1 << 19, false, true, true, false, 10, LeastConnections})
+			})
+		})
+		t.Run("udp", func(t *testing.T) {
+			t.Run("1-loop", func(t *testing.T) {
+				runClient(t, "udp", ":9991", &testConf{true, 1 << 18, false, false, false, false, 10, RoundRobin})
+			})
+			t.Run("N-loop", func(t *testing.T) {
+				runClient(t, "udp", ":9992", &testConf{true, 1 << 19, false, true, false, false, 10, LeastConnections})
+			})
+		})
+		t.Run("udp-async", func(t *testing.T) {
+			t.Run("1-loop", func(t *testing.T) {
+				runClient(t, "udp", ":9991", &testConf{true, 1 << 18, false, false, true, false, 10, RoundRobin})
+			})
+			t.Run("N-loop", func(t *testing.T) {
+				runClient(t, "udp", ":9992", &testConf{true, 1 << 19, false, true, true, false, 10, LeastConnections})
+			})
+		})
+		t.Run("unix", func(t *testing.T) {
+			t.Run("1-loop", func(t *testing.T) {
+				runClient(t, "unix", "gnet1.sock", &testConf{true, 1 << 18, false, false, false, false, 10, RoundRobin})
+			})
+			t.Run("N-loop", func(t *testing.T) {
+				runClient(t, "unix", "gnet2.sock", &testConf{true, 1 << 19, false, true, false, false, 10, SourceAddrHash})
+			})
+		})
+		t.Run("unix-async", func(t *testing.T) {
+			t.Run("1-loop", func(t *testing.T) {
+				runClient(t, "unix", "gnet1.sock", &testConf{true, 1 << 18, false, false, true, false, 10, RoundRobin})
+			})
+			t.Run("N-loop", func(t *testing.T) {
+				runClient(t, "unix", "gnet2.sock", &testConf{true, 1 << 19, false, true, true, false, 10, SourceAddrHash})
 			})
 		})
 	})
@@ -199,50 +261,50 @@ func TestClient(t *testing.T) {
 	t.Run("poll-reuseport-LT", func(t *testing.T) {
 		t.Run("tcp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", false, true, false, false, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{false, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", false, true, true, false, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{false, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("tcp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", false, true, false, true, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{false, 0, true, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", false, true, true, false, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{false, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", false, true, false, false, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{false, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", false, true, true, false, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{false, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", false, true, false, false, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{false, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", false, true, true, true, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{false, 0, true, true, true, false, 10, LeastConnections})
 			})
 		})
 		t.Run("unix", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", false, true, false, false, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{false, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", false, true, true, false, 10, LeastConnections)
+				runClient(t, "unix", "gnet2.sock", &testConf{false, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("unix-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", false, true, false, true, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{false, 0, true, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", false, true, true, true, 10, LeastConnections)
+				runClient(t, "unix", "gnet2.sock", &testConf{false, 0, true, true, true, false, 10, LeastConnections})
 			})
 		})
 	})
@@ -250,50 +312,50 @@ func TestClient(t *testing.T) {
 	t.Run("poll-reuseport-ET", func(t *testing.T) {
 		t.Run("tcp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", true, true, false, false, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{true, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", true, true, true, false, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{true, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("tcp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9991", true, true, false, true, 10, RoundRobin)
+				runClient(t, "tcp", ":9991", &testConf{true, 0, true, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "tcp", ":9992", true, true, true, false, 10, LeastConnections)
+				runClient(t, "tcp", ":9992", &testConf{true, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", true, true, false, false, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{true, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", true, true, true, false, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{true, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("udp-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9991", true, true, false, false, 10, RoundRobin)
+				runClient(t, "udp", ":9991", &testConf{true, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "udp", ":9992", true, true, true, true, 10, LeastConnections)
+				runClient(t, "udp", ":9992", &testConf{true, 0, true, true, true, false, 10, LeastConnections})
 			})
 		})
 		t.Run("unix", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", true, true, false, false, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{true, 0, true, false, false, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", true, true, true, false, 10, LeastConnections)
+				runClient(t, "unix", "gnet2.sock", &testConf{true, 0, true, true, false, false, 10, LeastConnections})
 			})
 		})
 		t.Run("unix-async", func(t *testing.T) {
 			t.Run("1-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet1.sock", true, true, false, true, 10, RoundRobin)
+				runClient(t, "unix", "gnet1.sock", &testConf{true, 0, true, false, true, false, 10, RoundRobin})
 			})
 			t.Run("N-loop", func(t *testing.T) {
-				runClient(t, "unix", "gnet2.sock", true, true, true, true, 10, LeastConnections)
+				runClient(t, "unix", "gnet2.sock", &testConf{true, 0, true, true, true, false, 10, LeastConnections})
 			})
 		})
 	})
@@ -313,7 +375,6 @@ type testClient struct {
 	connected     int32
 	clientActive  int32
 	disconnected  int32
-	workerPool    *goPool.Pool
 	udpReadHeader int32
 }
 
@@ -325,8 +386,8 @@ func (s *testClient) OnBoot(eng Engine) (action Action) {
 func (s *testClient) OnOpen(c Conn) (out []byte, action Action) {
 	c.SetContext(&sync.Once{})
 	atomic.AddInt32(&s.connected, 1)
-	require.NotNil(s.tester, c.LocalAddr(), "nil local addr")
-	require.NotNil(s.tester, c.RemoteAddr(), "nil remote addr")
+	assert.NotNil(s.tester, c.LocalAddr(), "nil local addr")
+	assert.NotNil(s.tester, c.RemoteAddr(), "nil remote addr")
 	return
 }
 
@@ -335,14 +396,13 @@ func (s *testClient) OnClose(c Conn, err error) (action Action) {
 		logging.Debugf("error occurred on closed, %v\n", err)
 	}
 	if s.network != "udp" {
-		require.IsType(s.tester, c.Context(), new(sync.Once), "invalid context")
+		assert.IsType(s.tester, c.Context(), new(sync.Once), "invalid context")
 	}
 
 	atomic.AddInt32(&s.disconnected, 1)
 	if atomic.LoadInt32(&s.connected) == atomic.LoadInt32(&s.disconnected) &&
 		atomic.LoadInt32(&s.disconnected) == int32(s.nclients) {
 		action = Shutdown
-		s.workerPool.Release()
 	}
 
 	return
@@ -350,7 +410,7 @@ func (s *testClient) OnClose(c Conn, err error) (action Action) {
 
 func (s *testClient) OnShutdown(Engine) {
 	if s.network == "udp" {
-		require.EqualValues(s.tester, int32(s.nclients), atomic.LoadInt32(&s.udpReadHeader))
+		assert.EqualValues(s.tester, int32(s.nclients), atomic.LoadInt32(&s.udpReadHeader))
 	}
 }
 
@@ -358,9 +418,9 @@ func (s *testClient) OnTraffic(c Conn) (action Action) {
 	readHeader := func() {
 		ping := make([]byte, len(pingMsg))
 		n, err := io.ReadFull(c, ping)
-		require.NoError(s.tester, err)
-		require.EqualValues(s.tester, len(pingMsg), n)
-		require.Equal(s.tester, string(pingMsg), string(ping), "bad header")
+		assert.NoError(s.tester, err)
+		assert.EqualValues(s.tester, len(pingMsg), n)
+		assert.Equal(s.tester, string(pingMsg), string(ping), "bad header")
 	}
 	v := c.Context()
 	if v != nil {
@@ -369,7 +429,8 @@ func (s *testClient) OnTraffic(c Conn) (action Action) {
 
 	if s.async {
 		buf := bbPool.Get()
-		_, _ = c.WriteTo(buf)
+		_, err := c.WriteTo(buf)
+		assert.NoError(s.tester, err, "WriteTo error")
 
 		if s.network == "tcp" || s.network == "unix" {
 			// just for test
@@ -381,25 +442,27 @@ func (s *testClient) OnTraffic(c Conn) (action Action) {
 			atomic.AddInt32(&s.udpReadHeader, 1)
 			buf.Reset()
 		}
-		_ = s.workerPool.Submit(
+		err = goPool.DefaultWorkerPool.Submit(
 			func() {
 				if buf.Len() > 0 {
 					err := c.AsyncWrite(buf.Bytes(), nil)
-					require.NoError(s.tester, err)
+					assert.NoError(s.tester, err)
 				}
 			})
+		assert.NoError(s.tester, err)
 		return
 	}
 
-	buf, _ := c.Next(-1)
+	buf, err := c.Next(-1)
+	assert.NoError(s.tester, err, "Reading data error")
 	if v == nil && bytes.Equal(buf, pingMsg) {
 		atomic.AddInt32(&s.udpReadHeader, 1)
 		buf = nil
 	}
 	if len(buf) > 0 {
 		n, err := c.Write(buf)
-		require.NoError(s.tester, err)
-		require.EqualValues(s.tester, len(buf), n)
+		assert.NoError(s.tester, err)
+		assert.EqualValues(s.tester, len(buf), n)
 	}
 	return
 }
@@ -413,7 +476,12 @@ func (s *testClient) OnTick() (delay time.Duration, action Action) {
 			if i%2 == 0 {
 				netConn = true
 			}
-			go startGnetClient(s.tester, s.client, s.network, s.addr, s.multicore, s.async, netConn)
+			err := goPool.DefaultWorkerPool.Submit(
+				func() {
+					startGnetClient(s.tester, s.client, s.network, s.addr, s.multicore, s.async, netConn)
+				})
+			assert.NoError(s.tester, err)
+
 		}
 	}
 	if s.network == "udp" && atomic.LoadInt32(&s.clientActive) == 0 {
@@ -423,21 +491,22 @@ func (s *testClient) OnTick() (delay time.Duration, action Action) {
 	return
 }
 
-func runClient(t *testing.T, network, addr string, et, reuseport, multicore, async bool, nclients int, lb LoadBalancing) {
+func runClient(t *testing.T, network, addr string, conf *testConf) {
 	ts := &testClient{
-		tester:     t,
-		network:    network,
-		addr:       addr,
-		multicore:  multicore,
-		async:      async,
-		nclients:   nclients,
-		workerPool: goPool.Default(),
+		tester:    t,
+		network:   network,
+		addr:      addr,
+		multicore: conf.multicore,
+		async:     conf.async,
+		nclients:  conf.clients,
 	}
 	var err error
 	clientEV := &clientEvents{tester: t, packetLen: streamLen, svr: ts}
 	ts.client, err = NewClient(
 		clientEV,
-		WithLogLevel(logging.DebugLevel),
+		WithEdgeTriggeredIO(conf.et),
+		WithEdgeTriggeredIOChunk(conf.etChunk),
+		WithTCPNoDelay(TCPNoDelay),
 		WithLockOSThread(true),
 		WithTicker(true),
 	)
@@ -449,19 +518,18 @@ func runClient(t *testing.T, network, addr string, et, reuseport, multicore, asy
 
 	err = Run(ts,
 		network+"://"+addr,
-		WithEdgeTriggeredIO(et),
-		WithLockOSThread(async),
-		WithMulticore(multicore),
-		WithReusePort(reuseport),
+		WithEdgeTriggeredIO(conf.et),
+		WithEdgeTriggeredIOChunk(conf.etChunk),
+		WithLockOSThread(conf.async),
+		WithMulticore(conf.multicore),
+		WithReusePort(conf.reuseport),
 		WithTicker(true),
 		WithTCPKeepAlive(time.Minute*1),
-		WithTCPNoDelay(TCPDelay),
-		WithLoadBalancing(lb))
+		WithLoadBalancing(conf.lb))
 	assert.NoError(t, err)
 }
 
 func startGnetClient(t *testing.T, cli *Client, network, addr string, multicore, async, netDial bool) {
-	rand.Seed(time.Now().UnixNano())
 	var (
 		c   Conn
 		err error
@@ -472,16 +540,16 @@ func startGnetClient(t *testing.T, cli *Client, network, addr string, multicore,
 	}
 	if netDial {
 		var netConn net.Conn
-		netConn, err = NetDial(network, addr)
-		require.NoError(t, err)
+		netConn, err = stdDial(network, addr)
+		assert.NoError(t, err)
 		c, err = cli.EnrollContext(netConn, handler)
 	} else {
 		c, err = cli.DialContext(network, addr, handler)
 	}
-	require.NoError(t, err)
-	defer c.Close()
+	assert.NoError(t, err)
+	defer c.Close() //nolint:errcheck
 	err = c.Wake(nil)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 	rspCh := handler.rspCh
 	duration := time.Duration((rand.Float64()*2+1)*float64(time.Second)) / 2
 	logging.Debugf("test duration: %v", duration)
@@ -491,15 +559,15 @@ func startGnetClient(t *testing.T, cli *Client, network, addr string, multicore,
 		if network == "udp" {
 			reqData = reqData[:datagramLen]
 		}
-		_, err = rand.Read(reqData)
-		require.NoError(t, err)
+		_, err = crand.Read(reqData)
+		assert.NoError(t, err)
 		err = c.AsyncWrite(reqData, nil)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		respData := <-rspCh
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		if !async {
-			// require.Equalf(t, reqData, respData, "response mismatch with protocol:%s, multi-core:%t, content of bytes: %d vs %d", network, multicore, string(reqData), string(respData))
-			require.Equalf(
+			// assert.Equalf(t, reqData, respData, "response mismatch with protocol:%s, multi-core:%t, content of bytes: %d vs %d", network, multicore, string(reqData), string(respData))
+			assert.Equalf(
 				t,
 				reqData,
 				respData,
@@ -536,13 +604,13 @@ func (ev *clientEventsForWake) OnTraffic(c Conn) (action Action) {
 	assert.Nilf(ev.tester, buf, "expected: %v, but got: %v", nil, buf)
 	assert.ErrorIsf(ev.tester, err, io.ErrShortBuffer, "expected error: %v, but got: %v", io.ErrShortBuffer, err)
 	buf, err = c.Next(-1)
-	assert.Nilf(ev.tester, buf, "expected: %v, but got: %v", nil, buf)
+	assert.Emptyf(ev.tester, buf, "expected an empty slice, but got: %v", buf)
 	assert.NoErrorf(ev.tester, err, "expected: %v, but got: %v", nil, err)
 	buf, err = c.Peek(10)
 	assert.Nilf(ev.tester, buf, "expected: %v, but got: %v", nil, buf)
 	assert.ErrorIsf(ev.tester, err, io.ErrShortBuffer, "expected error: %v, but got: %v", io.ErrShortBuffer, err)
 	buf, err = c.Peek(-1)
-	assert.Nilf(ev.tester, buf, "expected: %v, but got: %v", nil, buf)
+	assert.Emptyf(ev.tester, buf, "expected an empty slice, but got: %v", buf)
 	assert.NoErrorf(ev.tester, err, "expected: %v, but got: %v", nil, err)
 	n, err = c.Discard(10)
 	assert.Zerof(ev.tester, n, "expected: %v, but got: %v", 0, n)
@@ -583,7 +651,10 @@ func (ev *serverEventsForWake) OnClose(_ Conn, _ error) Action {
 
 func (ev *serverEventsForWake) OnTick() (time.Duration, Action) {
 	if atomic.CompareAndSwapInt32(&ev.started, 0, 1) {
-		go testConnWakeImmediately(ev.tester, ev.client, ev.clientEV, ev.network, ev.addr)
+		err := goPool.DefaultWorkerPool.Submit(func() {
+			testConnWakeImmediately(ev.tester, ev.client, ev.clientEV, ev.network, ev.addr)
+		})
+		assert.NoError(ev.tester, err)
 	}
 	return 100 * time.Millisecond, None
 }
@@ -599,9 +670,22 @@ func testConnWakeImmediately(t *testing.T, client *Client, clientEV *clientEvent
 }
 
 func TestWakeConnImmediately(t *testing.T) {
+	currentLogger, currentFlusher := logging.GetDefaultLogger(), logging.GetDefaultFlusher()
+	t.Cleanup(func() {
+		logging.SetDefaultLoggerAndFlusher(currentLogger, currentFlusher) // restore
+	})
+
 	clientEV := &clientEventsForWake{tester: t}
-	client, err := NewClient(clientEV, WithLogLevel(logging.DebugLevel))
+	logPath := filepath.Join(t.TempDir(), "gnet-test-wake-conn-immediately.log")
+	client, err := NewClient(clientEV,
+		WithSocketRecvBuffer(4*1024),
+		WithSocketSendBuffer(4*1024),
+		WithLogPath(logPath),
+		WithLogLevel(logging.WarnLevel),
+		WithReadBufferCap(512),
+		WithWriteBufferCap(512))
 	assert.NoError(t, err)
+	logging.Cleanup()
 
 	err = client.Start()
 	assert.NoError(t, err)
@@ -614,19 +698,28 @@ func TestWakeConnImmediately(t *testing.T) {
 }
 
 func TestClientReadOnEOF(t *testing.T) {
+	currentLogger, currentFlusher := logging.GetDefaultLogger(), logging.GetDefaultFlusher()
+	t.Cleanup(func() {
+		logging.SetDefaultLoggerAndFlusher(currentLogger, currentFlusher) // restore
+	})
+
 	ln, err := net.Listen("tcp", "127.0.0.1:9999")
 	assert.NoError(t, err)
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 
-	go func() {
+	err = goPool.DefaultWorkerPool.Submit(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				break
 			}
-			go process(conn)
+			err = goPool.DefaultWorkerPool.Submit(func() {
+				process(conn)
+			})
+			assert.NoError(t, err)
 		}
-	}()
+	})
+	assert.NoError(t, err)
 
 	ev := &clientReadOnEOF{
 		result: make(chan struct {
@@ -635,7 +728,13 @@ func TestClientReadOnEOF(t *testing.T) {
 		}, 1),
 		data: []byte("test"),
 	}
-	cli, err := NewClient(ev)
+	cli, err := NewClient(ev,
+		WithSocketRecvBuffer(4*1024),
+		WithSocketSendBuffer(4*1024),
+		WithTCPKeepAlive(time.Minute),
+		WithLogger(zap.NewExample().Sugar()),
+		WithReadBufferCap(32*1024),
+		WithWriteBufferCap(32*1024))
 	assert.NoError(t, err)
 	defer cli.Stop() //nolint:errcheck
 
@@ -655,7 +754,7 @@ func TestClientReadOnEOF(t *testing.T) {
 }
 
 func process(conn net.Conn) {
-	defer conn.Close() //noliint:errcheck
+	defer conn.Close() //nolint:errcheck
 	buf := make([]byte, 8)
 	n, err := conn.Read(buf)
 	if err != nil {

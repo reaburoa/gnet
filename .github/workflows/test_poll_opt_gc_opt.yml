@@ -42,20 +42,20 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '^1.17'
+          go-version: '^1.20'
           cache: false
 
       - name: Setup and run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.56.2
-          args: -v -E gofumpt -E gocritic -E misspell -E revive -E godot
+          version: v2.1.5
+          args: -v -E gocritic -E misspell -E revive -E godot
   test:
     needs: lint
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.17', '1.21']
+        go: ['1.20', '1.24']
         os: [ubuntu-latest, macos-latest]
     name: Go ${{ matrix.go }} @ ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -68,7 +68,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '^1.17'
+          go-version: '^1.20'
 
       - name: Print Go environment
         id: go-env
@@ -90,7 +90,7 @@ jobs:
         run: go test -v -tags=poll_opt,gc_opt -coverprofile="codecov.report" -covermode=atomic -timeout 10m -failfast
 
       - name: Upload the code coverage report to codecov.io
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./codecov.report
           flags: unittests

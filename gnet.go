@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package gnet implements a high-performance, lightweight, non-blocking,
+// event-driven networking framework written in pure Go.
+//
+// Visit https://gnet.host/ for more details about gnet.
 package gnet
 
 import (
@@ -23,10 +27,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/panjf2000/gnet/v2/internal/math"
 	"github.com/panjf2000/gnet/v2/pkg/buffer/ring"
-	"github.com/panjf2000/gnet/v2/pkg/errors"
+	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/panjf2000/gnet/v2/pkg/math"
 )
 
 // Action is an action that occurs after the completion of an event.
@@ -52,10 +56,10 @@ type Engine struct {
 // Validate checks whether the engine is available.
 func (e Engine) Validate() error {
 	if e.eng == nil || len(e.eng.listeners) == 0 {
-		return errors.ErrEmptyEngine
+		return errorx.ErrEmptyEngine
 	}
-	if e.eng.isInShutdown() {
-		return errors.ErrEngineInShutdown
+	if e.eng.isShutdown() {
+		return errorx.ErrEngineInShutdown
 	}
 	return nil
 }
@@ -73,20 +77,72 @@ func (e Engine) CountConnections() (count int) {
 	return
 }
 
+// Register registers the new connection to the event-loop that is chosen
+// based off of the algorithm set by WithLoadBalancing.
+// You should call either of the NewNetConnContext or NewNetAddrContext
+// and pass the returned context to this method. net.Conn will precede
+// net.Addr if both are present in the context.
+//
+// Note that you need to switch to another load-balancing algorithm over
+// the default RoundRobin when starting the engine, to avoid data race
+// issue if you plan on calling this method from somewhere later on.
+func (e Engine) Register(ctx context.Context) (<-chan RegisteredResult, error) {
+	if err := e.Validate(); err != nil {
+		return nil, err
+	}
+
+	if e.eng.eventLoops.len() == 0 {
+		return nil, errorx.ErrEmptyEngine
+	}
+
+	c, ok := FromNetConnContext(ctx)
+	if ok {
+		return e.eng.eventLoops.next(c.RemoteAddr()).Enroll(ctx, c)
+	}
+
+	addr, ok := FromNetAddrContext(ctx)
+	if ok {
+		return e.eng.eventLoops.next(addr).Register(ctx, addr)
+	}
+
+	return nil, errorx.ErrInvalidNetworkAddress
+}
+
 // Dup returns a copy of the underlying file descriptor of listener.
 // It is the caller's responsibility to close dupFD when finished.
 // Closing listener does not affect dupFD, and closing dupFD does not affect listener.
+//
+// Note that this method is only available when the engine has only one listener.
 func (e Engine) Dup() (fd int, err error) {
 	if err := e.Validate(); err != nil {
 		return -1, err
 	}
+
 	if len(e.eng.listeners) > 1 {
-		return -1, errors.ErrUnsupportedOp
+		return -1, errorx.ErrUnsupportedOp
 	}
+
 	for _, ln := range e.eng.listeners {
 		fd, err = ln.dup()
 	}
+
 	return
+}
+
+// DupListener is like Dup, but it duplicates the listener with the given network and address.
+// This is useful when there are multiple listeners.
+func (e Engine) DupListener(network, addr string) (int, error) {
+	if err := e.Validate(); err != nil {
+		return -1, err
+	}
+
+	for _, ln := range e.eng.listeners {
+		if ln.network == network && ln.address == addr {
+			return ln.dup()
+		}
+	}
+
+	return -1, errorx.ErrInvalidNetworkAddress
 }
 
 // Stop gracefully shuts down this Engine without interrupting any active event-loops,
@@ -101,7 +157,7 @@ func (e Engine) Stop(ctx context.Context) error {
 	ticker := time.NewTicker(shutdownPollInterval)
 	defer ticker.Stop()
 	for {
-		if e.eng.isInShutdown() {
+		if e.eng.isShutdown() {
 			return nil
 		}
 		select {
@@ -126,7 +182,7 @@ type asyncCmd struct {
 	fd  gfd.GFD
 	typ asyncCmdType
 	cb  AsyncCallback
-	arg interface{}
+	param any
 }
 
 // AsyncWrite writes data to the given connection asynchronously.
@@ -135,7 +191,7 @@ func (e Engine) AsyncWrite(fd gfd.GFD, p []byte, cb AsyncCallback) error {
 		return err
 	}
 
-	return e.eng.sendCmd(&asyncCmd{fd: fd, typ: asyncCmdWrite, cb: cb, arg: p}, false)
+	return e.eng.sendCmd(&asyncCmd{fd: fd, typ: asyncCmdWrite, cb: cb, param: p}, false)
 }
 
 // AsyncWritev is like AsyncWrite, but it accepts a slice of byte slices.
@@ -144,7 +200,7 @@ func (e Engine) AsyncWritev(fd gfd.GFD, batch [][]byte, cb AsyncCallback) error 
 		return err
 	}
 
-	return e.eng.sendCmd(&asyncCmd{fd: fd, typ: asyncCmdWritev, cb: cb, arg: batch}, false)
+	return e.eng.sendCmd(&asyncCmd{fd: fd, typ: asyncCmdWritev, cb: cb, param: batch}, false)
 }
 
 // Close closes the given connection.
@@ -208,6 +264,13 @@ type Writer interface {
 	io.Writer     // not concurrency-safe
 	io.ReaderFrom // not concurrency-safe
 
+	// SendTo transmits a message to the given address, it's not concurrency-safe.
+	// It is available only for UDP sockets, an ErrUnsupportedOp will be returned
+	// when it is called on a non-UDP socket.
+	// This method should be used only when you need to send a message to a specific
+	// address over the UDP socket, otherwise you should use Conn.Write() instead.
+	SendTo(buf []byte, addr net.Addr) (n int, err error)
+
 	// Writev writes multiple byte slices to remote synchronously, it's not concurrency-safe,
 	// you must invoke it within any method in EventHandler.
 	Writev(bs [][]byte) (n int, err error)
@@ -237,9 +300,12 @@ type Writer interface {
 	AsyncWritev(bs [][]byte, callback AsyncCallback) (err error)
 }
 
-// AsyncCallback is a callback which will be invoked after the asynchronous functions has finished executing.
+// AsyncCallback is a callback that will be invoked after the asynchronous function finishes.
 //
-// Note that the parameter gnet.Conn is already released under UDP protocol, thus it's not allowed to be accessed.
+// Note that the parameter gnet.Conn might have been already released when it's UDP protocol,
+// thus it shouldn't be accessed.
+// This callback will be executed in event-loop, thus it must not block, otherwise,
+// it blocks the event-loop.
 type AsyncCallback func(c Conn, err error) error
 
 // Socket is a set of functions which manipulate the underlying file descriptor of a connection.
@@ -293,8 +359,52 @@ type Socket interface {
 	// algorithm).
 	// The default is true (no delay), meaning that data is sent as soon as possible after a Write.
 	SetNoDelay(noDelay bool) error
-	// CloseRead() error
-	// CloseWrite() error
+}
+
+// Runnable defines the common protocol of an execution on an event-loop.
+// This interface should be implemented and passed to an event-loop in some way,
+// then the event-loop invokes Run to perform the execution.
+// !!!Caution: Run must not contain any blocking operations like heavy disk or
+// network I/O, or else it will block the event-loop.
+type Runnable interface {
+	// Run is about to be executed by the event-loop.
+	Run(ctx context.Context) error
+}
+
+// RunnableFunc is an adapter to allow the use of ordinary function as a Runnable.
+type RunnableFunc func(ctx context.Context) error
+
+// Run executes the RunnableFunc itself.
+func (fn RunnableFunc) Run(ctx context.Context) error {
+	return fn(ctx)
+}
+
+// RegisteredResult is the result of a Register call.
+type RegisteredResult struct {
+	Conn Conn
+	Err  error
+}
+
+// EventLoop provides a set of methods for manipulating the event-loop.
+type EventLoop interface {
+	// ============= Concurrency-safe methods =============
+
+	// Register connects to the given address and registers the connection to the current event-loop.
+	Register(ctx context.Context, addr net.Addr) (<-chan RegisteredResult, error)
+	// Enroll is like Register, but it accepts an established net.Conn instead of a net.Addr.
+	Enroll(ctx context.Context, c net.Conn) (<-chan RegisteredResult, error)
+	// Execute executes the given runnable on the event-loop at some time in the future.
+	Execute(ctx context.Context, runnable Runnable) error
+	// Schedule is like Execute, but it allows you to specify when the runnable is executed.
+	// In other words, the runnable will be executed when the delay duration is reached.
+	// TODO(panjf2000): not supported yet, implement this.
+	Schedule(ctx context.Context, runnable Runnable, delay time.Duration) error
+
+	// ============ Concurrency-unsafe methods ============
+
+	// Close closes the given Conn that belongs to the current event-loop.
+	// It must be called on the same event-loop that the connection belongs to.
+	Close(Conn) error
 }
 
 // Conn is an interface of underlying connection.
@@ -305,11 +415,15 @@ type Conn interface {
 
 	// Context returns a user-defined context, it's not concurrency-safe,
 	// you must invoke it within any method in EventHandler.
-	Context() (ctx interface{})
+	Context() (ctx any)
+
+	// EventLoop returns the event-loop that the connection belongs to.
+	// The returned EventLoop is concurrency-safe.
+	EventLoop() EventLoop
 
 	// SetContext sets a user-defined context, it's not concurrency-safe,
 	// you must invoke it within any method in EventHandler.
-	SetContext(ctx interface{})
+	SetContext(ctx any)
 
 	// LocalAddr is the connection's local socket address, it's not concurrency-safe,
 	// you must invoke it within any method in EventHandler.
@@ -442,7 +556,14 @@ func createListeners(addrs []string, opts ...Option) ([]*listener, *Options, err
 	if options.LockOSThread && options.NumEventLoop > 10000 {
 		logging.Errorf("too many event-loops under LockOSThread mode, should be less than 10,000 "+
 			"while you are trying to set up %d\n", options.NumEventLoop)
-		return nil, nil, errors.ErrTooManyEventLoopThreads
+		return nil, nil, errorx.ErrTooManyEventLoopThreads
+	}
+
+	if options.EdgeTriggeredIOChunk > 0 {
+		options.EdgeTriggeredIO = true
+		options.EdgeTriggeredIOChunk = math.CeilToPowerOfTwo(options.EdgeTriggeredIOChunk)
+	} else if options.EdgeTriggeredIO {
+		options.EdgeTriggeredIOChunk = 1 << 20 // 1MB
 	}
 
 	rbc := options.ReadBufferCap
@@ -488,14 +609,21 @@ func createListeners(addrs []string, opts ...Option) ([]*listener, *Options, err
 	// with the capability of load balancing, it's the equivalent of Linux's SO_REUSEPORT.
 	// Also note that DragonFlyBSD 3.6.0 extended SO_REUSEPORT to distribute workload to
 	// available sockets, which make it the same as Linux's SO_REUSEPORT.
-	//
+	goos := runtime.GOOS
+	if options.ReusePort &&
+		(options.Multicore || options.NumEventLoop > 1) &&
+		(goos != "linux" && goos != "dragonfly" && goos != "freebsd") {
+		options.ReusePort = false
+	}
+
 	// Despite the fact that SO_REUSEPORT can be set on a Unix domain socket
 	// via setsockopt() without reporting an error, SO_REUSEPORT is actually
 	// not supported for sockets of AF_UNIX. Thus, we avoid setting it on the
 	// Unix domain sockets.
-	goos := runtime.GOOS
-	if (options.Multicore || options.NumEventLoop > 1) && options.ReusePort &&
-		((goos != "linux" && goos != "dragonfly" && goos != "freebsd") || hasUnix) {
+	// As of this commit https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net.git/commit/?id=5b0af621c3f6,
+	// EOPNOTSUPP will be returned when trying to set SO_REUSEPORT on an AF_UNIX socket on Linux. We therefore
+	// avoid setting it on Unix domain sockets on all UNIX-like platforms to keep this behavior consistent.
+	if options.ReusePort && hasUnix {
 		options.ReusePort = false
 	}
 
@@ -588,17 +716,17 @@ func Stop(ctx context.Context, protoAddr string) error {
 		eng.shutdown(nil)
 		defer allEngines.Delete(protoAddr)
 	} else {
-		return errors.ErrEngineInShutdown
+		return errorx.ErrEngineInShutdown
 	}
 
-	if eng.isInShutdown() {
-		return errors.ErrEngineInShutdown
+	if eng.isShutdown() {
+		return errorx.ErrEngineInShutdown
 	}
 
 	ticker := time.NewTicker(shutdownPollInterval)
 	defer ticker.Stop()
 	for {
-		if eng.isInShutdown() {
+		if eng.isShutdown() {
 			return nil
 		}
 		select {
@@ -612,17 +740,17 @@ func Stop(ctx context.Context, protoAddr string) error {
 func parseProtoAddr(protoAddr string) (string, string, error) {
 	protoAddr = strings.ToLower(protoAddr)
 	if strings.Count(protoAddr, "://") != 1 {
-		return "", "", errors.ErrInvalidNetworkAddress
+		return "", "", errorx.ErrInvalidNetworkAddress
 	}
 	pair := strings.SplitN(protoAddr, "://", 2)
 	proto, addr := pair[0], pair[1]
 	switch proto {
 	case "tcp", "tcp4", "tcp6", "udp", "udp4", "udp6", "unix":
 	default:
-		return "", "", errors.ErrUnsupportedProtocol
+		return "", "", errorx.ErrUnsupportedProtocol
 	}
 	if addr == "" {
-		return "", "", errors.ErrInvalidNetworkAddress
+		return "", "", errorx.ErrInvalidNetworkAddress
 	}
 	return proto, addr, nil
 }

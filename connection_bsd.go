@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //go:build darwin || dragonfly || freebsd || netbsd || openbsd
-// +build darwin dragonfly freebsd netbsd openbsd
 
 package gnet
 
@@ -22,7 +21,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/panjf2000/gnet/v2/internal/netpoll"
+	"github.com/panjf2000/gnet/v2/pkg/netpoll"
 )
 
 func (c *conn) processIO(_ int, filter netpoll.IOEvent, flags netpoll.IOFlags) (err error) {
@@ -50,7 +49,7 @@ func (c *conn) processIO(_ int, filter netpoll.IOEvent, flags netpoll.IOFlags) (
 			// 1) EVFILT_WRITE|EV_ADD|EV_CLEAR|EV_EOF, 2) EVFILT_READ|EV_ADD|EV_CLEAR|EV_EOF.
 			err = el.write(c)
 		default:
-			c.outboundBuffer.Release() // don't bother to write to a connection with some unknown error
+			c.outboundBuffer.Release() // don't bother to write to a connection that is already broken
 			err = el.close(c, io.EOF)
 		}
 	}
