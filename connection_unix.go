@@ -40,6 +40,7 @@ type conn struct {
 	gfd            gfd.GFD                // gnet file descriptor
 	ctx            any                    // user-defined context
 	remote         unix.Sockaddr          // remote socket address
+	proto          string                 // protocol name: "tcp", "udp", or "unix".
 	localAddr      net.Addr               // local addr
 	remoteAddr     net.Addr               // remote addr
 	loop           *eventloop             // connected event-loop
@@ -53,9 +54,10 @@ type conn struct {
 	isEOF          bool                   // whether the connection has reached EOF
 }
 
-func newTCPConn(fd int, el *eventloop, sa unix.Sockaddr, localAddr, remoteAddr net.Addr) (c *conn) {
+func newStreamConn(proto string, fd int, el *eventloop, sa unix.Sockaddr, localAddr, remoteAddr net.Addr) (c *conn) {
 	c = &conn{
 		fd:             fd,
+		proto:          proto,
 		remote:         sa,
 		loop:           el,
 		localAddr:      localAddr,
@@ -70,6 +72,7 @@ func newTCPConn(fd int, el *eventloop, sa unix.Sockaddr, localAddr, remoteAddr n
 func newUDPConn(fd int, el *eventloop, localAddr net.Addr, sa unix.Sockaddr, connected bool) (c *conn) {
 	c = &conn{
 		fd:             fd,
+		proto:          "udp",
 		gfd:            gfd.NewGFD(fd, el.idx, 0, 0),
 		remote:         sa,
 		loop:           el,
@@ -145,6 +148,12 @@ func (c *conn) write(data []byte) (n int, err error) {
 		return
 	}
 
+	defer func() {
+		if err != nil {
+			_ = c.loop.close(c, os.NewSyscallError("write", err))
+		}
+	}()
+
 	var sent int
 loop:
 	if sent, err = unix.Write(c.fd, data); err != nil {
@@ -153,11 +162,11 @@ loop:
 		if err == unix.EAGAIN {
 			_, err = c.outboundBuffer.Write(data)
 			if !isET {
-				err = c.loop.poller.ModReadWrite(&c.pollAttachment, false)
+				err = c.loop.poller.ModReadWrite(&c.pollAttachment, isET)
 			}
 			return
 		}
-		return 0, c.loop.close(c, os.NewSyscallError("write", err))
+		return 0, err
 	}
 	data = data[sent:]
 	if isET && len(data) > 0 {
@@ -166,7 +175,7 @@ loop:
 	// Failed to send all data back to the remote, buffer the leftover data for the next round.
 	if len(data) > 0 {
 		_, _ = c.outboundBuffer.Write(data)
-		err = c.loop.poller.ModReadWrite(&c.pollAttachment, false)
+		err = c.loop.poller.ModReadWrite(&c.pollAttachment, isET)
 	}
 
 	return
@@ -188,6 +197,12 @@ func (c *conn) writev(bs [][]byte) (n int, err error) {
 		return
 	}
 
+	defer func() {
+		if err != nil {
+			_ = c.loop.close(c, os.NewSyscallError("writev", err))
+		}
+	}()
+
 	remaining := n
 	var sent int
 loop:
@@ -197,11 +212,11 @@ loop:
 		if err == unix.EAGAIN {
 			_, err = c.outboundBuffer.Writev(bs)
 			if !isET {
-				err = c.loop.poller.ModReadWrite(&c.pollAttachment, false)
+				err = c.loop.poller.ModReadWrite(&c.pollAttachment, isET)
 			}
 			return
 		}
-		return 0, c.loop.close(c, os.NewSyscallError("writev", err))
+		return 0, err
 	}
 	pos := len(bs)
 	if remaining -= sent; remaining > 0 {
@@ -223,7 +238,7 @@ loop:
 	// Failed to send all data back to the remote, buffer the leftover data for the next round.
 	if remaining > 0 {
 		_, _ = c.outboundBuffer.Writev(bs)
-		err = c.loop.poller.ModReadWrite(&c.pollAttachment, false)
+		err = c.loop.poller.ModReadWrite(&c.pollAttachment, isET)
 	}
 
 	return
@@ -467,7 +482,17 @@ func (c *conn) SetNoDelay(noDelay bool) error {
 }
 
 func (c *conn) SetKeepAlivePeriod(d time.Duration) error {
+	if c.proto != "tcp" {
+		return errorx.ErrUnsupportedOp
+	}
 	return socket.SetKeepAlivePeriod(c.fd, int(d.Seconds()))
+}
+
+func (c *conn) SetKeepAlive(enabled bool, idle, intvl time.Duration, cnt int) error {
+	if c.proto != "tcp" {
+		return errorx.ErrUnsupportedOp
+	}
+	return socket.SetKeepAlive(c.fd, enabled, int(idle.Seconds()), int(intvl.Seconds()), cnt)
 }
 
 func (c *conn) AsyncWrite(buf []byte, callback AsyncCallback) error {

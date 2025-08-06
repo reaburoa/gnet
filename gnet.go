@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/panjf2000/gnet/v2/internal/gfd"
 	"github.com/panjf2000/gnet/v2/pkg/buffer/ring"
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
@@ -230,33 +231,27 @@ type Reader interface {
 	io.Reader
 	io.WriterTo
 
-	// Next returns a slice containing the next n bytes from the buffer,
-	// advancing the buffer as if the bytes had been returned by Read.
-	// Calling this method has the same effect as calling Peek and Discard.
-	// If the amount of the available bytes is less than requested, a pair of (0, io.ErrShortBuffer)
-	// is returned.
+	// Next returns the next n bytes and advance the inbound buffer.
+	// buf must not be used in a new goroutine. Otherwise, use Read instead.
 	//
-	// Note that the []byte buf returned by Next() is not allowed to be passed to a new goroutine,
-	// as this []byte will be reused within event-loop.
-	// If you have to use buf in a new goroutine, then you need to make a copy of buf and pass this copy
-	// to that new goroutine.
+	// If the number of the available bytes is less than requested,
+	// a pair of (0, io.ErrShortBuffer) is returned.
 	Next(n int) (buf []byte, err error)
 
-	// Peek returns the next n bytes without advancing the inbound buffer, the returned bytes
-	// remain valid until a Discard is called. If the amount of the available bytes is
-	// less than requested, a pair of (0, io.ErrShortBuffer) is returned.
+	// Peek returns the next n bytes without advancing the inbound buffer,
+	// the returned bytes remain valid until a Discard is called.
+	// buf must neither be used in a new goroutine nor anywhere after the call
+	// to Discard, make a copy of buf manually or use Read otherwise.
 	//
-	// Note that the []byte buf returned by Peek() is not allowed to be passed to a new goroutine,
-	// as this []byte will be reused within event-loop.
-	// If you have to use buf in a new goroutine, then you need to make a copy of buf and pass this copy
-	// to that new goroutine.
+	// If the number of the available bytes is less than requested,
+	// a pair of (0, io.ErrShortBuffer) is returned.
 	Peek(n int) (buf []byte, err error)
 
 	// Discard advances the inbound buffer with next n bytes, returning the number of bytes discarded.
 	Discard(n int) (discarded int, err error)
 
 	// InboundBuffered returns the number of bytes that can be read from the current buffer.
-	InboundBuffered() (n int)
+	InboundBuffered() int
 }
 
 // Writer is an interface that consists of a number of methods for writing that Conn must implement.
@@ -277,11 +272,11 @@ type Writer interface {
 
 	// Flush writes any buffered data to the underlying connection, it's not concurrency-safe,
 	// you must invoke it within any method in EventHandler.
-	Flush() (err error)
+	Flush() error
 
 	// OutboundBuffered returns the number of bytes that can be read from the current buffer.
 	// it's not concurrency-safe, you must invoke it within any method in EventHandler.
-	OutboundBuffered() (n int)
+	OutboundBuffered() int
 
 	// AsyncWrite writes bytes to remote asynchronously, it's concurrency-safe,
 	// you don't have to invoke it within any method in EventHandler,
@@ -324,35 +319,50 @@ type Socket interface {
 	// Closing c does not affect fd, and closing fd does not affect c.
 	//
 	// The returned file descriptor is different from the
-	// connection's. Attempting to change properties of the original
+	//  connection. Attempting to change the properties of the original
 	// using this duplicate may or may not have the desired effect.
 	Dup() (int, error)
 
 	// SetReadBuffer sets the size of the operating system's
 	// receive buffer associated with the connection.
-	SetReadBuffer(bytes int) error
+	SetReadBuffer(size int) error
 
 	// SetWriteBuffer sets the size of the operating system's
 	// transmit buffer associated with the connection.
-	SetWriteBuffer(bytes int) error
+	SetWriteBuffer(size int) error
 
 	// SetLinger sets the behavior of Close on a connection which still
 	// has data waiting to be sent or to be acknowledged.
 	//
-	// If sec < 0 (the default), the operating system finishes sending the
+	// If secs < 0 (the default), the operating system finishes sending the
 	// data in the background.
 	//
-	// If sec == 0, the operating system discards any unsent or
+	// If secs == 0, the operating system discards any unsent or
 	// unacknowledged data.
 	//
-	// If sec > 0, the data is sent in the background as with sec < 0. On
+	// If secs > 0, the data is sent in the background as with sec < 0. On
 	// some operating systems after sec seconds have elapsed any remaining
 	// unsent data may be discarded.
-	SetLinger(sec int) error
+	SetLinger(secs int) error
 
-	// SetKeepAlivePeriod tells operating system to send keep-alive messages on the connection
-	// and sets period between TCP keep-alive probes.
+	// SetKeepAlivePeriod tells the operating system to send keep-alive
+	// messages on the connection and sets period between TCP keep-alive probes.
 	SetKeepAlivePeriod(d time.Duration) error
+
+	// SetKeepAlive enables/disables the TCP keepalive with all socket options:
+	// TCP_KEEPIDLE, TCP_KEEPINTVL and TCP_KEEPCNT. idle is the value for TCP_KEEPIDLE,
+	// intvl is the value for TCP_KEEPINTVL, cnt is the value for TCP_KEEPCNT,
+	// ignored when enabled is false.
+	//
+	// With TCP keep-alive enabled, idle is the time (in seconds) the connection
+	// needs to remain idle before TCP starts sending keep-alive probes,
+	// intvl is the time (in seconds) between individual keep-alive probes.
+	// TCP will drop the connection after sending cnt probes without getting
+	// any replies from the peer; then the socket is destroyed, and OnClose
+	// is triggered.
+	//
+	// If one of idle, intvl, or cnt is less than 1, an error is returned.
+	SetKeepAlive(enabled bool, idle, intvl time.Duration, cnt int) error
 
 	// SetNoDelay controls whether the operating system should delay
 	// packet transmission in hopes of sending fewer packets (Nagle's
@@ -363,7 +373,7 @@ type Socket interface {
 
 // Runnable defines the common protocol of an execution on an event-loop.
 // This interface should be implemented and passed to an event-loop in some way,
-// then the event-loop invokes Run to perform the execution.
+// then the event-loop will invoke Run to perform the execution.
 // !!!Caution: Run must not contain any blocking operations like heavy disk or
 // network I/O, or else it will block the event-loop.
 type Runnable interface {
@@ -387,23 +397,24 @@ type RegisteredResult struct {
 
 // EventLoop provides a set of methods for manipulating the event-loop.
 type EventLoop interface {
-	// ============= Concurrency-safe methods =============
-
-	// Register connects to the given address and registers the connection to the current event-loop.
+	// Register connects to the given address and registers the connection to the current event-loop,
+	// it's concurrency-safe.
 	Register(ctx context.Context, addr net.Addr) (<-chan RegisteredResult, error)
-	// Enroll is like Register, but it accepts an established net.Conn instead of a net.Addr.
+	// Enroll is like Register, but it accepts an established net.Conn instead of a net.Addr,
+	// it's concurrency-safe.
 	Enroll(ctx context.Context, c net.Conn) (<-chan RegisteredResult, error)
-	// Execute executes the given runnable on the event-loop at some time in the future.
+	// Execute will execute the given runnable on the event-loop at some time in the future,
+	// it's concurrency-safe.
 	Execute(ctx context.Context, runnable Runnable) error
 	// Schedule is like Execute, but it allows you to specify when the runnable is executed.
-	// In other words, the runnable will be executed when the delay duration is reached.
+	// In other words, the runnable will be executed when the delay duration is reached,
+	// it's concurrency-safe.
 	// TODO(panjf2000): not supported yet, implement this.
 	Schedule(ctx context.Context, runnable Runnable, delay time.Duration) error
 
-	// ============ Concurrency-unsafe methods ============
-
 	// Close closes the given Conn that belongs to the current event-loop.
 	// It must be called on the same event-loop that the connection belongs to.
+	// This method is not concurrency-safe, you must invoke it on the event loop.
 	Close(Conn) error
 }
 
@@ -427,31 +438,31 @@ type Conn interface {
 
 	// LocalAddr is the connection's local socket address, it's not concurrency-safe,
 	// you must invoke it within any method in EventHandler.
-	LocalAddr() (addr net.Addr)
+	LocalAddr() net.Addr
 
 	// RemoteAddr is the connection's remote address, it's not concurrency-safe,
 	// you must invoke it within any method in EventHandler.
-	RemoteAddr() (addr net.Addr)
+	RemoteAddr() net.Addr
 
-	// Wake triggers a OnTraffic event for the current connection, it's concurrency-safe.
-	Wake(callback AsyncCallback) (err error)
+	// Wake triggers an OnTraffic event for the current connection, it's concurrency-safe.
+	Wake(callback AsyncCallback) error
 
 	// CloseWithCallback closes the current connection, it's concurrency-safe.
 	// Usually you should provide a non-nil callback for this method,
 	// otherwise your better choice is Close().
-	CloseWithCallback(callback AsyncCallback) (err error)
+	CloseWithCallback(callback AsyncCallback) error
 
 	// Close closes the current connection, implements net.Conn, it's concurrency-safe.
-	Close() (err error)
+	Close() error
 
 	// SetDeadline implements net.Conn.
-	SetDeadline(t time.Time) (err error)
+	SetDeadline(time.Time) error
 
 	// SetReadDeadline implements net.Conn.
-	SetReadDeadline(t time.Time) (err error)
+	SetReadDeadline(time.Time) error
 
 	// SetWriteDeadline implements net.Conn.
-	SetWriteDeadline(t time.Time) (err error)
+	SetWriteDeadline(time.Time) error
 }
 
 type (
@@ -480,10 +491,7 @@ type (
 
 		// OnTraffic fires when a socket receives data from the remote.
 		//
-		// Note that the []byte returned from Conn.Peek(int)/Conn.Next(int) is not allowed to be passed to a new goroutine,
-		// as this []byte will be reused within event-loop after OnTraffic() returns.
-		// If you have to use this []byte in a new goroutine, you should either make a copy of it or call Conn.Read([]byte)
-		// to read data into your own []byte, then pass the new []byte to the new goroutine.
+		// Also check out the comments on Reader and Writer interfaces.
 		OnTraffic(c Conn) (action Action)
 
 		// OnTick fires immediately after the engine starts and will fire again
@@ -491,9 +499,9 @@ type (
 		OnTick() (delay time.Duration, action Action)
 	}
 
-	// BuiltinEventEngine is a built-in implementation of EventHandler which sets up each method with a default implementation,
-	// you can compose it with your own implementation of EventHandler when you don't want to implement all methods
-	// in EventHandler.
+	// BuiltinEventEngine is a built-in implementation of EventHandler which sets up
+	// each method with a default implementation, you can compose it with your own
+	// implementation of EventHandler when you don't want to implement all methods in EventHandler.
 	BuiltinEventEngine struct{}
 )
 
@@ -552,7 +560,7 @@ func createListeners(addrs []string, opts ...Option) ([]*listener, *Options, err
 	logging.Debugf("default logging level is %s", logging.LogLevel())
 
 	// The maximum number of operating system threads that the Go program can use is initially set to 10000,
-	// which should also be the maximum amount of I/O event-loops locked to OS threads that users can start up.
+	// which should also be the maximum number of I/O event-loops locked to OS threads that users can start up.
 	if options.LockOSThread && options.NumEventLoop > 10000 {
 		logging.Errorf("too many event-loops under LockOSThread mode, should be less than 10,000 "+
 			"while you are trying to set up %d\n", options.NumEventLoop)
@@ -608,7 +616,7 @@ func createListeners(addrs []string, opts ...Option) ([]*listener, *Options, err
 	// Note that FreeBSD 12 introduced a new socket option named SO_REUSEPORT_LB
 	// with the capability of load balancing, it's the equivalent of Linux's SO_REUSEPORT.
 	// Also note that DragonFlyBSD 3.6.0 extended SO_REUSEPORT to distribute workload to
-	// available sockets, which make it the same as Linux's SO_REUSEPORT.
+	// available sockets, which makes it the same as Linux's SO_REUSEPORT.
 	goos := runtime.GOOS
 	if options.ReusePort &&
 		(options.Multicore || options.NumEventLoop > 1) &&
@@ -753,4 +761,18 @@ func parseProtoAddr(protoAddr string) (string, string, error) {
 		return "", "", errorx.ErrInvalidNetworkAddress
 	}
 	return proto, addr, nil
+}
+
+func determineEventLoops(opts *Options) int {
+	numEventLoop := 1
+	if opts.Multicore {
+		numEventLoop = runtime.NumCPU()
+	}
+	if opts.NumEventLoop > 0 {
+		numEventLoop = opts.NumEventLoop
+	}
+	if numEventLoop > gfd.EventLoopIndexMax {
+		numEventLoop = gfd.EventLoopIndexMax
+	}
+	return numEventLoop
 }
